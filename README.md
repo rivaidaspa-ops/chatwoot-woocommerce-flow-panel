@@ -1,3 +1,7 @@
+# Rivaida Woo Panel v8.0
+
+Corrección de credenciales desde interfaz para Chile y Colombia. Incluye creación automática de tabla `app_settings`, pruebas Woo con valores del formulario antes de guardar y mensajes claros si falta URL/Key/Secret.
+
 # Rivaida WooCommerce + Chatwoot Panel v7.6
 
 Panel multi-país Chile/Colombia para Chatwoot, WooCommerce, Dropi, Flow/Woo payment links, Redis, catálogo rápido y pagos WooCommerce.

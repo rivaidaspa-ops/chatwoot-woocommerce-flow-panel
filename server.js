@@ -1,4 +1,4 @@
-// v7.9: UI credenciales modal, IA, auto-tienda por inbox/telefono y stock seguro.
+// v8.0: credenciales UI robustas, tabla app_settings, pruebas Woo CL/CO y multitienda estable.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -26,7 +26,7 @@ function parseJsonEnv(name, fallback) { try { return process.env[name] ? JSON.pa
 
 function defaultPaymentPresets(storeId = 'co') {
   if (storeId !== 'co') return [];
-  const configured = parseJsonEnv('CO_PAYMENT_METHOD_PRESETS_JSON','CL_DEFAULT_SHIPPING_METHOD_ID','CL_DEFAULT_SHIPPING_METHOD_TITLE','CO_DEFAULT_SHIPPING_METHOD_ID','CO_DEFAULT_SHIPPING_METHOD_TITLE', null);
+  const configured = parseJsonEnv('CO_PAYMENT_METHOD_PRESETS_JSON', null);
   if (Array.isArray(configured) && configured.length) return configured;
   return [
     { id: getCfg('CO_COD_GATEWAY_ID', 'cod'), title: getCfg('CO_COD_GATEWAY_TITLE', 'Contra entrega'), kind: 'cash_on_delivery', requires_link: false, recommended: true },
@@ -112,7 +112,30 @@ function rebuildRuntimeConfig() { STORE_CONFIG = buildStoreConfig(); wcClients.c
 function listStores() { return Object.values(STORE_CONFIG).map((s)=>({ id:s.id, code:s.code, name:s.name, country:s.country, currency:s.currency, document_label:s.document_label, document_type:s.document_type, payment_gateway_id:s.payment_gateway_id, payment_presets:s.payment_presets||[], enabled:Boolean(s.wc_url&&s.wc_key&&s.wc_secret) })); }
 function resolveStore(input='') { const raw=String(input||'').trim().toLowerCase(); return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>String(s.country||s.code).toLowerCase()===raw) || STORE_CONFIG[DEFAULT_STORE] || Object.values(STORE_CONFIG)[0]; }
 function storeFromReq(req) { return resolveStore(req.query.store || req.query.country || req.body?.store_id || req.body?.store || req.body?.country || req.headers['x-store-id'] || currentDefaultStore()); }
-function wcForStore(store) { const st=resolveStore(store?.id||store); if(!st?.wc_url||!st?.wc_key||!st?.wc_secret){ const e=new Error(`WooCommerce no configurado para tienda ${st?.id||store}`); e.status=400; throw e; } if(!wcClients.has(st.id)){ wcClients.set(st.id, axios.create({ baseURL:`${st.wc_url}/wp-json/wc/v3`, auth:{ username:st.wc_key, password:st.wc_secret }, timeout:Number(process.env.WC_TIMEOUT_MS||30000) })); } return wcClients.get(st.id); }
+function missingWooFields(st = {}) {
+  const missing = [];
+  if (!st.wc_url) missing.push('URL WooCommerce');
+  if (!st.wc_key) missing.push('Consumer Key');
+  if (!st.wc_secret) missing.push('Consumer Secret');
+  return missing;
+}
+function wcForStore(store) {
+  const st = resolveStore(store?.id || store);
+  const missing = missingWooFields(st);
+  if (missing.length) {
+    const e = new Error(`WooCommerce no configurado para tienda ${st?.id || store}. Faltan: ${missing.join(', ')}. Abra Credenciales, complete Woo ${st?.id === 'co' ? 'Colombia' : 'Chile'} y presione Guardar credenciales.`);
+    e.status = 400;
+    throw e;
+  }
+  if (!wcClients.has(st.id)) {
+    wcClients.set(st.id, axios.create({
+      baseURL: `${st.wc_url}/wp-json/wc/v3`,
+      auth: { username: st.wc_key, password: st.wc_secret },
+      timeout: Number(process.env.WC_TIMEOUT_MS || 30000)
+    }));
+  }
+  return wcClients.get(st.id);
+}
 
 const requiredEnv = ['PANEL_USER','PANEL_PASSWORD'];
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
@@ -197,7 +220,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v7.6-colombia-pagos-dropi', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.0-credentials-fix', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -352,9 +375,19 @@ const CONFIG_KEYS = [
   'PAYMENT_LINK_PROVIDER','FLOW_API_URL','FLOW_API_KEY','FLOW_SECRET_KEY','FLOW_URL_CONFIRMATION','FLOW_URL_RETURN','AI_RECOMMENDATION_WEBHOOK_URL',
   'CACHE_TTL_SECONDS','PRODUCT_PAGE_SIZE','MAX_PAGE_SIZE','SYNC_PER_PAGE','VARIATION_CACHE_SECONDS','CHATWOOT_SEND_IMAGE_ATTACHMENT','CHATWOOT_INBOX_STORE_MAP','CL_CHATWOOT_INBOX_IDS','CO_CHATWOOT_INBOX_IDS','AUTO_STORE_BY_PHONE','AI_PROVIDER','OPENAI_API_KEY','OPENAI_MODEL','DEEPSEEK_API_KEY','DEEPSEEK_MODEL','GEMINI_API_KEY','GEMINI_MODEL'
 ];
+async function ensureAppSettingsTable() {
+  if (!pgPool) return false;
+  await pgPool.query(`CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ DEFAULT now()
+  )`);
+  return true;
+}
 async function loadAppSettingsFromDb() {
   if (!pgPool) return;
   try {
+    await ensureAppSettingsTable();
     const { rows } = await pgPool.query('SELECT key,value FROM app_settings');
     for (const row of rows) process.env[row.key] = row.value;
     rebuildRuntimeConfig();
@@ -362,6 +395,7 @@ async function loadAppSettingsFromDb() {
 }
 async function saveAppSettingsToDb(settings = {}) {
   if (!pgPool || !dbReady) return false;
+  await ensureAppSettingsTable();
   const entries = Object.entries(settings).filter(([key]) => CONFIG_KEYS.includes(key));
   const client = await pgPool.connect();
   try {
@@ -406,6 +440,7 @@ async function initDb() {
     await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_sku ON product_index (sku)`);
     await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_categories ON product_index USING gin(categorias)`);
     await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_sale ON product_index (precio_oferta)`);
+    await ensureAppSettingsTable();
     dbReady = true;
     await loadAppSettingsFromDb();
     console.log('[Postgres] indice de productos y configuracion listo');
@@ -706,6 +741,12 @@ app.post('/admin/settings', async (req, res, next) => {
 });
 app.post('/admin/settings/test', async (req, res, next) => {
   try {
+    const incomingSettings = req.body?.settings || {};
+    for (const [key, value] of Object.entries(incomingSettings)) {
+      if (CONFIG_KEYS.includes(key)) process.env[key] = String(value ?? '');
+    }
+    if (Object.keys(incomingSettings).length) rebuildRuntimeConfig();
+
     const target = req.body?.target || 'chatwoot';
     if (target === 'chatwoot') return res.json(await testChatwootConnection());
     if (target === 'woo') return res.json(await testWooStore(req.body?.store || 'cl'));

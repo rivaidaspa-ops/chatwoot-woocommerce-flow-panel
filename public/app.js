@@ -151,8 +151,7 @@ async function enrichContextFromServer(conversationId='') {
 }
 function requestChatwootContext() {
   if (window.parent && window.parent !== window) {
-    maybeAutoSwitchStoreFromContext(ctx, source);
-  const status = $('chatwootContextStatus');
+    const status = $('chatwootContextStatus');
     if (status) status.textContent = 'Solicitando contexto a Chatwoot...';
     window.parent.postMessage('chatwoot-dashboard-app:fetch-info', '*');
   }
@@ -1035,9 +1034,15 @@ async function saveSettings() {
 }
 async function testSettings(target, store='') {
   try {
-    const data = await api('/admin/settings/test', { method:'POST', body: JSON.stringify({ target, store }) });
-    alert(`Prueba correcta: ${JSON.stringify(data, null, 2)}`);
-  } catch (e) { alert(`Error en prueba: ${e.message}`); }
+    const settings = collectSettingsForm();
+    const data = await api('/admin/settings/test', { method:'POST', body: JSON.stringify({ target, store, settings }) });
+    notifySuccess('Prueba correcta', target === 'woo' ? `Woo ${store === 'co' ? 'Colombia' : 'Chile'} conectado.` : 'Chatwoot conectado.');
+    alert(`Prueba correcta:
+${JSON.stringify(data, null, 2)}`);
+  } catch (e) {
+    notifyError('Error en prueba', e.message);
+    alert(`Error en prueba: ${e.message}`);
+  }
 }
 
 async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v74`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
