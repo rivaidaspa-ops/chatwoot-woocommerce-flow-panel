@@ -1,4 +1,4 @@
-// v8.5 Rivaida Commerce Hub: modales estables, pais automatico, stock primero y ayudas contextuales.
+// v8.6 Rivaida Commerce Hub: aislamiento tienda, selector pais, diagnosticos y Chatwoot estable.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -76,6 +76,7 @@ function extractEmailFromString(value='') {
   const match = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return match ? match[0].toLowerCase() : '';
 }
+function isValidEmailLocal(value='') { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim()); }
 function extractChatwootContext(payload = {}) {
   const appContext = payload.event === 'appContext' ? payload.data : (payload.appContext || payload.data || payload);
   const conversation = appContext.conversation || appContext.currentConversation || appContext;
@@ -284,7 +285,7 @@ async function loadStores() {
     const data = await api('/stores'); state.stores = data.stores || [];
     const urlStore = new URLSearchParams(location.search).get('store');
     const serverDefault = data.default_store || 'cl';
-    const wanted = urlStore || serverDefault || state.activeStore || 'cl';
+    const wanted = urlStore || state.activeStore || serverDefault || 'cl';
     const exists = state.stores.find(s => s.id === wanted);
     state.activeStore = exists ? wanted : (firstEnabledStoreId() || state.stores[0]?.id || 'cl');
     if (!isStoreEnabled(state.activeStore)) {
@@ -312,14 +313,25 @@ function applyStoreUI() {
   if ($('billingRut')) $('billingRut').placeholder = st.country === 'CO' ? 'Documento: CC / NIT' : 'RUT: 12.345.678-9';
   if ($('docHelp')) $('docHelp').innerHTML = st.country === 'CO' ? 'Documento CC / NIT para WooCommerce Colombia. Ciudad y departamento quedan aislados de Chile.' : 'RUT chileno en campos esenciales: billing_rut y shipping_rut.';
   if ($('billingPhone')) $('billingPhone').placeholder = st.country === 'CO' ? 'Telefono +57' : 'Telefono +56';
+  if ($('assistantCountryPill')) $('assistantCountryPill').textContent = st.country === 'CO' ? 'CO · Colombia' : 'CL · Chile';
+  if ($('recommendationBox') && !state.recommendations) {
+    $('recommendationBox').innerHTML = st.country === 'CO'
+      ? 'Asistente Colombia independiente: CC/NIT, ciudad/departamento, COP, métodos Woo y envíos disponibles.'
+      : 'Asistente Chile independiente: RUT, región/comuna, CLP, Flow/Woo y despacho local.';
+  }
+  document.body.classList.remove('store-cl','store-co');
+  document.body.classList.add(`store-${st.id}`);
 }
 async function changeStore(storeId) {
   state.activeStore = storeId || 'cl'; localStorage.setItem('activeStore', state.activeStore);
-  document.body.classList.remove('store-cl','store-co');
-  document.body.classList.add(`store-${state.activeStore}`);
+  if ($('storeSelect')) $('storeSelect').value = state.activeStore;
   pushUiLog('info', 'Cambio de tienda', state.activeStore === 'co' ? 'Colombia' : 'Chile');
-  state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.shippingMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null; state.selectedOrder=null; state.recommendations=null; state.coupon=null;
-  applyStoreUI(); renderCart(); renderOrders([]); if ($('productsList')) $('productsList').innerHTML = `<div class="store-switch-state"><strong>${text(currentStore().name || state.activeStore)}</strong><p>Cargando catálogo separado para esta tienda...</p></div>`; if ($('recommendationBox')) $('recommendationBox').innerHTML = 'Asistente independiente por país. Presiona recomendar cuando tengas cliente o carrito.';
+  state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.shippingMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null; state.selectedOrder=null; state.recommendations=null; state.coupon=null; state.regiones=[];
+  if ($('billingRegion')) $('billingRegion').innerHTML = '<option value="">Cargando...</option>';
+  if ($('billingComuna')) $('billingComuna').innerHTML = '<option value="">Seleccione primero</option>';
+  if ($('billingPostcode')) $('billingPostcode').value = '';
+  if ($('stockFilter')) $('stockFilter').value = 'instock';
+  applyStoreUI(); renderCart(); renderOrders([]); if ($('productsList')) $('productsList').innerHTML = `<div class="store-switch-state"><strong>${text(currentStore().name || state.activeStore)}</strong><p>Cargando catálogo separado para esta tienda...</p></div>`;
   if (!isStoreEnabled(state.activeStore)) {
     const st = currentStore();
     notifyWarning('WooCommerce no configurado', `${st.name || st.id} no tiene credenciales. Puedes seguir usando otra tienda configurada.`);
@@ -332,7 +344,7 @@ async function changeStore(storeId) {
   await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); await loadProducts(true);
 }
 async function loadRegiones(force=false) {
-  const key = `regiones_${state.activeStore}_v83`;
+  const key = `regiones_${state.activeStore}_v86`;
   const cached = !force && readLocal(key, 86400000 * 30);
   if (cached) { state.regiones = cached; renderRegionOptions(); return; }
   const data = await api('/regiones'); state.regiones = data.regiones || []; saveLocal(key, state.regiones); renderRegionOptions();
@@ -699,6 +711,7 @@ async function loadProducts(force=false, append=false) {
     const endpoint = `/productos/search?${buildProductSearchParams(nextOffset)}${force ? '&refresh=true' : ''}`;
     const data = await api(endpoint);
     if (expectedStore !== state.activeStore) { pushUiLog('warning','Catálogo descartado por cambio de tienda', `${expectedStore} → ${state.activeStore}`); return; }
+    if (data.store && data.store !== state.activeStore) { notifyWarning('Catálogo descartado', `El servidor respondió ${data.store}, pero la tienda activa es ${state.activeStore}.`); return; }
     let incoming = (data.productos || []).filter(p => !p.store_id || p.store_id === state.activeStore);
     incoming = incoming.sort((a,b)=>((b.stock_status === 'instock') - (a.stock_status === 'instock')) || String(a.nombre || '').localeCompare(String(b.nombre || ''),'es'));
     state.productos = append ? [...state.productos, ...incoming] : incoming;
@@ -1146,6 +1159,10 @@ async function saveConversationAttributes() {
     rivaida_email_detectado: $('customerEmail')?.value?.trim() || '',
     rivaida_carrito_total: cartTotal ? String(Math.round(cartTotal)) : '',
     rivaida_rut_validado: $('rutStatus')?.classList?.contains('ok') ? 'true' : 'false',
+    rivaida_store: state.activeStore,
+    rivaida_country: currentStore().country,
+    rivaida_metodo_pago: $('paymentMethod')?.value || '',
+    rivaida_metodo_envio: $('shippingMethod')?.selectedOptions?.[0]?.textContent || '',
     rivaida_ultimo_producto: state.cart[0]?.product?.nombre || '',
     rivaida_ultimo_sku: state.cart[0]?.variation?.sku || state.cart[0]?.product?.sku || ''
   };
@@ -1209,7 +1226,7 @@ ${JSON.stringify(data, null, 2)}`);
   }
 }
 
-async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v83`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
+async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v86`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
 
 function addHelpBubbles() {
   const helpMap = {

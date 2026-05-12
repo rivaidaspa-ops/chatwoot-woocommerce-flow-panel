@@ -35,3 +35,12 @@ PAYMENT_LINK_PROVIDER=woocommerce
 ```
 
 Las credenciales Woo/Chatwoot/IA se cargan desde el modal **Credenciales**.
+
+
+## v8.6 hotfix
+- Corrige `RUT_META_KEYS is not defined`.
+- Evita error `Parámetro(s) no válido(s): email` cuando Chatwoot no entrega correo válido.
+- El selector Chile/Colombia ya no vuelve siempre a `DEFAULT_STORE` después de guardar credenciales.
+- Aísla catálogo, carrito, regiones, métodos y asistente por tienda activa.
+- Estado y Logs usan `/diagnostics/status` y `/diagnostics/logs`.
+- Atributos Chatwoot incluyen tienda, país, método de pago y método de envío.

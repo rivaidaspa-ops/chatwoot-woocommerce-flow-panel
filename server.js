@@ -166,7 +166,7 @@ let dbReady = false;
 let redisReady = false;
 let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
 const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.5.0';
+const APP_VERSION = '8.6.0';
 const appLogs = [];
 function addLog(level, message, data = {}) {
   const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
@@ -495,6 +495,15 @@ function getMetaValue(metaData = [], keys = []) {
   return '';
 }
 
+const RUT_META_KEYS = ['billing_rut','_billing_rut','shipping_rut','_shipping_rut','rut','_rut'];
+const CO_DOCUMENT_META_KEYS = ['billing_document','_billing_document','shipping_document','_shipping_document','billing_cedula','shipping_cedula','billing_nit','shipping_nit','document','cedula','nit'];
+function documentKeysForStore(store) {
+  const st = resolveStore(store?.id || store || currentDefaultStore());
+  if (Array.isArray(st.document_fields) && st.document_fields.length) return Array.from(new Set([...st.document_fields, ...(st.country === 'CL' ? RUT_META_KEYS : CO_DOCUMENT_META_KEYS)]));
+  return st.country === 'CL' ? RUT_META_KEYS : CO_DOCUMENT_META_KEYS;
+}
+function isValidEmail(value='') { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim()); }
+
 function extractMeta(metaData = []) {
   const result = {};
   for (const m of metaData || []) {
@@ -693,7 +702,7 @@ function buildDocumentMeta(documentValue, store) {
 }
 function normalizeCheckout(body, store = resolveStore(currentDefaultStore())) {
   const st = resolveStore(store.id || store);
-  const documentValue = String(body.document || body.rut || body.billing?.rut || body.billing?.document || getMetaValue(body.meta_data, RUT_META_KEYS) || '').trim();
+  const documentValue = String(body.document || body.rut || body.billing?.rut || body.billing?.document || getMetaValue(body.meta_data, documentKeysForStore(st)) || '').trim();
   if (st.document_required !== false && st.document_type === 'rut' && !validateRut(documentValue)) { const e = new Error('RUT chileno invalido o faltante'); e.status = 400; throw e; }
   if (st.document_required !== false && st.document_type !== 'rut' && !normalizeDocument(documentValue)) { const e = new Error(`${st.document_label || 'Documento'} faltante`); e.status = 400; throw e; }
   const billing = { ...(body.billing || {}) };
@@ -901,16 +910,18 @@ app.post('/cache/clear', async (req, res) => { memoryCache.clear(); await cacheD
 app.get('/cliente', async (req, res, next) => {
   try {
     const email = String(req.query.email || req.query.email_cliente || req.query.customer_email || '').trim().toLowerCase();
-    if (!email) return res.status(400).json({ error: 'Debe indicar email del cliente' });
-    const force = req.query.refresh === 'true';
     const st = storeFromReq(req);
+    if (!email || !isValidEmail(email)) {
+      return res.json({ store: st.id, country: st.country, cliente: { nombre: '', email: email || '', telefono: '', rut: '', direccion: {} }, pedidos: [], cached: false, warning: email ? 'Email no valido para consultar WooCommerce' : 'Email no informado' });
+    }
+    const force = req.query.refresh === 'true';
     const wc = wcForStore(st);
     const result = await remember(`cliente:${st.id}:${email}`, 60, async () => {
       const { data: customers } = await wc.get('/customers', { params: { email, per_page: 1 } });
       const customer = customers[0] || null;
       const { data: orders } = await wc.get('/orders', { params: { search: email, per_page: 30, orderby: 'date', order: 'desc' } });
       const billing = customer?.billing || {};
-      const rutMeta = getMetaValue(customer?.meta_data || [], RUT_META_KEYS) || '';
+      const rutMeta = getMetaValue(customer?.meta_data || [], documentKeysForStore(st)) || '';
       const regionFound = comunaRegionMap.get(normalizeText(billing.city || '')) || null;
       return {
         cliente: customer ? { id: customer.id, nombre: `${customer.first_name || ''} ${customer.last_name || ''}`.trim(), email: customer.email, telefono: billing.phone || '', rut: rutMeta || billing.rut || '', direccion: { ...billing, region_codigo: regionFound?.codigo || billing.state || '', region_nombre: regionFound?.region || billing.state || '' }, meta: extractMeta(customer.meta_data) } : { nombre: '', email, telefono: '', rut: '', direccion: {} },
@@ -925,7 +936,7 @@ app.get('/cliente', async (req, res, next) => {
           fecha: order.date_created,
           metodo_pago: order.payment_method_title,
           payment_method: order.payment_method,
-          rut: getMetaValue(order.meta_data || [], RUT_META_KEYS) || '',
+          rut: getMetaValue(order.meta_data || [], documentKeysForStore(st)) || '',
           billing: order.billing || {},
           shipping: order.shipping || {},
           productos: order.line_items?.map((item) => ({ id: item.id, product_id: item.product_id, variation_id: item.variation_id, nombre: item.name, cantidad: item.quantity, total: item.total, subtotal: item.subtotal, sku: item.sku, meta: item.meta_data })) || [],
@@ -1351,7 +1362,8 @@ function normalizeConversationContext(conversation = {}) {
 async function getConversationLabels(client, conversationId) {
   try {
     const { data } = await client.get(`/conversations/${conversationId}/labels`);
-    return Array.isArray(data?.payload) ? data.payload : (Array.isArray(data) ? data : []);
+    const arr = Array.isArray(data?.payload) ? data.payload : (Array.isArray(data) ? data : []);
+    return arr.map((x) => typeof x === 'string' ? x : (x.title || x.name || x.label || '')).filter(Boolean).map(cleanLabel);
   } catch { return []; }
 }
 function cleanLabel(label='') {
@@ -1372,7 +1384,11 @@ const DEFAULT_CHATWOOT_ATTRIBUTES = [
   { attribute_display_name:'Rivaida ultimo producto', attribute_key:'rivaida_ultimo_producto', attribute_description:'Ultimo producto enviado al chat', attribute_display_type:0, attribute_model:0 },
   { attribute_display_name:'Rivaida ultimo SKU', attribute_key:'rivaida_ultimo_sku', attribute_description:'SKU del ultimo producto enviado', attribute_display_type:0, attribute_model:0 },
   { attribute_display_name:'Rivaida carrito total', attribute_key:'rivaida_carrito_total', attribute_description:'Total estimado del carrito', attribute_display_type:1, attribute_model:0 },
-  { attribute_display_name:'Rivaida rut validado', attribute_key:'rivaida_rut_validado', attribute_description:'RUT validado desde el panel', attribute_display_type:7, attribute_model:0 }
+  { attribute_display_name:'Rivaida rut validado', attribute_key:'rivaida_rut_validado', attribute_description:'RUT validado desde el panel', attribute_display_type:7, attribute_model:0 },
+  { attribute_display_name:'Rivaida tienda', attribute_key:'rivaida_store', attribute_description:'Tienda/pais activo: cl o co', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Rivaida pais', attribute_key:'rivaida_country', attribute_description:'Codigo de pais CL o CO', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Rivaida metodo pago', attribute_key:'rivaida_metodo_pago', attribute_description:'Metodo de pago elegido', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Rivaida metodo envio', attribute_key:'rivaida_metodo_envio', attribute_description:'Metodo de envio elegido', attribute_display_type:0, attribute_model:0 }
 ];
 
 async function sendChatwootProductMessage(client, conversationId, content, img, privateNote, contentAttributes) {
