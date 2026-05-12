@@ -287,10 +287,22 @@ function applyStoreUI() {
   if ($('billingRut')) $('billingRut').placeholder = st.country === 'CO' ? 'Documento: CC / NIT' : 'RUT: 12.345.678-9';
   if ($('docHelp')) $('docHelp').innerHTML = st.country === 'CO' ? 'Documento compatible con WooCommerce/Dropi. El departamento se envia como codigo Dropi.' : 'El RUT se guarda en campos esenciales: billing_rut y shipping_rut.';
   if ($('billingPhone')) $('billingPhone').placeholder = st.country === 'CO' ? 'Telefono +57' : 'Telefono +56';
+  updateAssistantCountryUI();
+}
+function updateAssistantCountryUI() {
+  const st = currentStore();
+  if ($('assistantCountryPill')) $('assistantCountryPill').textContent = `${st.id} · ${st.country === 'CO' ? 'Colombia' : 'Chile'}`;
+  const box = $('recommendationBox');
+  if (box && (!state.recommendations || state.recommendations.country !== st.country)) {
+    box.className = 'recommendation-box muted';
+    box.textContent = st.country === 'CO'
+      ? 'Asistente Colombia independiente: CC/NIT, ciudad/departamento, COP, métodos Woo y envíos disponibles.'
+      : 'Asistente Chile independiente: RUT, comuna/región, CLP, Flow/Woo y despacho local.';
+  }
 }
 async function changeStore(storeId) {
   state.activeStore = storeId || 'cl'; localStorage.setItem('activeStore', state.activeStore);
-  state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null;
+  state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null; state.recommendations=null;
   applyStoreUI(); renderCart(); renderOrders([]);
   if (!isStoreEnabled(state.activeStore)) {
     const st = currentStore();
@@ -456,6 +468,39 @@ function isStockValueOk(item) {
   if (item.manage_stock && item.stock !== null && item.stock !== undefined && Number(item.stock) <= 0) return false;
   return true;
 }
+function productHasPossibleStock(product) {
+  if (!product) return false;
+  if (product.type === 'variable') {
+    if (Array.isArray(product.variations) && product.variations.length) return product.variations.some(isStockValueOk);
+    if (product.stock_status) return product.stock_status === 'instock';
+    return Number(product.variation_count || 0) > 0;
+  }
+  return isStockValueOk(product);
+}
+function productStockRank(product) { return productHasPossibleStock(product) ? 0 : 1; }
+function sortProductsForDisplay(products=[]) {
+  return [...products].sort((a,b) => {
+    const stockDiff = productStockRank(a) - productStockRank(b);
+    if (stockDiff !== 0) return stockDiff;
+    return String(a?.nombre || '').localeCompare(String(b?.nombre || ''), 'es');
+  });
+}
+function cartItemStockStatus(item) {
+  const product = item?.product;
+  const variation = item?.variation || null;
+  const qty = Math.max(1, Number(item?.quantity || 1));
+  const can = canAddProduct(product, variation);
+  if (!can.ok) return { ok:false, reason: can.reason };
+  const stockSource = variation || product;
+  if (stockSource?.manage_stock && stockSource.stock !== null && stockSource.stock !== undefined && qty > Number(stockSource.stock)) {
+    return { ok:false, reason:`Stock insuficiente para ${product?.nombre || 'producto'}. Disponible: ${stockSource.stock}` };
+  }
+  return { ok:true };
+}
+function validateCartStockOrThrow() {
+  const bad = state.cart.map(cartItemStockStatus).find(x => !x.ok);
+  if (bad) throw new Error(bad.reason || 'Hay productos sin stock en el carrito.');
+}
 function canAddProduct(product, variation=null) {
   if (!product) return { ok: false, reason: 'Producto no encontrado' };
   if (product.type === 'variable') {
@@ -505,10 +550,15 @@ function renderProductCard(p) {
   const img = productImage(p);
   const price = current?.precio || p.precio;
   const can = canAddProduct(p, current);
-  const stockOk = can.ok;
+  const possibleStock = productHasPossibleStock(p);
+  const variableNeedsChoice = p.type === 'variable' && (!current || !can.ok);
+  const stockLabel = possibleStock ? (can.ok ? 'Con stock' : 'Elegir variación') : 'Sin stock';
   const typeText = p.type === 'variable' ? 'Producto variable' : 'Producto simple';
   const disabled = can.ok ? '' : 'disabled';
-  return `<article class="product-card ${can.ok ? '' : 'out-of-stock'}" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${stockOk ? 'ok' : 'no'}">${stockOk ? 'Con stock' : 'Sin stock'}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(current?.sku || p.sku)} · ${typeText}${p.variation_count ? ` · ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div>${renderVariationPanel(p)}${!can.ok ? `<div class="stock-warning">${text(can.reason)}</div>` : ''}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1" ${disabled}/><button data-add="${p.id}" ${disabled}>${can.ok ? 'Agregar' : 'Sin stock'}</button><button class="secondary" data-send="${p.id}" ${disabled}>Enviar a conversación</button></div></div></article>`;
+  const cardClass = possibleStock ? '' : 'out-of-stock';
+  const warning = !can.ok ? `<div class="stock-warning">${text(can.reason)}</div>` : '';
+  const addLabel = can.ok ? 'Agregar' : (possibleStock && variableNeedsChoice ? 'Elegir variación' : 'Sin stock');
+  return `<article class="product-card ${cardClass}" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${possibleStock ? 'ok' : 'no'}">${stockLabel}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(current?.sku || p.sku)} · ${typeText}${p.variation_count ? ` · ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div>${renderVariationPanel(p)}${warning}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1" ${disabled}/><button data-add="${p.id}" ${disabled}>${addLabel}</button><button class="secondary" data-send="${p.id}" ${disabled}>Enviar a conversación</button></div></div></article>`;
 }
 function renderVariationModal() {
   const product = findProduct(state.variationModalProductId);
@@ -561,6 +611,7 @@ function renderProducts() {
   const vCount = state.productos.reduce((s,p)=>s+Number(p.variation_count || (p.variations||[]).length || 0),0);
   setMetric('metricVariations', vCount);
   if (!state.productos.length) { $('productsList').innerHTML = '<span class="muted">No hay productos para mostrar.</span>'; $('loadMoreBtn').classList.add('hidden'); return; }
+  state.productos = sortProductsForDisplay(state.productos);
   $('productsList').innerHTML = state.productos.map(renderProductCard).join('');
   $('loadMoreInfo').textContent = `${state.productos.length}/${state.productTotal || state.productos.length} productos`;
   $('loadMoreBtn').classList.toggle('hidden', !(state.productos.length < state.productTotal || state.productos.length % state.productLimit === 0));
@@ -596,8 +647,13 @@ function removeFromCart(key) { state.cart = state.cart.filter(i => i.key !== key
 function cartItemImage(item) {
   return item.variation?.imagen || item.product?.imagen || item.product?.imagenes?.[0]?.src || '';
 }
+function setOrderButtonsDisabled(disabled, title='') {
+  ['createOrderBtn','payBtn'].forEach(id => { const btn = $(id); if (btn) { btn.disabled = Boolean(disabled); btn.title = disabled ? title : ''; } });
+}
 function renderCart() {
-  if (!state.cart.length) { $('cartBox').innerHTML = '<div class="cart-empty">Seleccione productos o variaciones para el pedido.</div>'; return; }
+  if (!state.cart.length) { $('cartBox').innerHTML = '<div class="cart-empty">Seleccione productos o variaciones para el pedido.</div>'; setOrderButtonsDisabled(false); return; }
+  const invalid = state.cart.map(cartItemStockStatus).find(x => !x.ok);
+  setOrderButtonsDisabled(Boolean(invalid), invalid?.reason || 'Hay productos sin stock en el carrito.');
   const subtotal = state.cart.reduce((s,i)=>s+Number(i.variation?.precio || i.product.precio || 0)*i.quantity,0);
   const couponAmount = state.coupon ? Number(state.coupon.amount || 0) : 0;
   const total = state.coupon?.discount_type === 'percent' ? Math.max(0, subtotal - Math.round(subtotal * couponAmount / 100)) : Math.max(0, subtotal - couponAmount);
@@ -606,12 +662,14 @@ function renderCart() {
     const img = cartItemImage(i);
     const sku = i.variation?.sku || i.product?.sku || '';
     const variation = i.variation ? variationLabel(i.variation) : '';
-    return `<div class="cart-item cart-item-rich">
+    const st = cartItemStockStatus(i);
+    return `<div class="cart-item cart-item-rich ${st.ok ? '' : 'out-of-stock'}">
       <div class="cart-thumb">${img ? `<img src="${text(img)}" alt="${text(i.product.nombre)}" loading="lazy"/>` : '<span>Sin imagen</span>'}</div>
       <div class="cart-info">
         <strong>${i.quantity}x ${text(i.product.nombre)}</strong>
         ${variation ? `<small>${text(variation)}</small>` : ''}
         ${sku ? `<small>SKU: ${text(sku)}</small>` : ''}
+        ${st.ok ? '' : `<small class="stock-warning">${text(st.reason || 'Sin stock disponible')}</small>`}
       </div>
       <div class="cart-price">
         <strong>${money(unit*i.quantity)}</strong>
@@ -668,8 +726,8 @@ async function loadProducts(force=false, append=false) {
   try {
     const endpoint = `/productos/search?${buildProductSearchParams(nextOffset)}${force ? '&refresh=true' : ''}`;
     const data = await api(endpoint);
-    const incoming = data.productos || [];
-    state.productos = append ? [...state.productos, ...incoming] : incoming;
+    const incoming = sortProductsForDisplay(data.productos || []);
+    state.productos = sortProductsForDisplay(append ? [...state.productos, ...incoming] : incoming);
     state.productTotal = Number(data.total || state.productos.length);
     state.productOffset = state.productos.length;
     renderProducts();
@@ -771,6 +829,7 @@ function buildOrderPayload() {
   const rut = $('billingRut').value.trim();
   const st = currentStore();
   if (!state.cart.length) throw new Error('Agregue al menos un producto.');
+  validateCartStockOrThrow();
   const required = ['billingFirstName','billingLastName','billingRut','billingPhone','billingAddress'];
   for (const id of required) if (!$(id).value.trim()) throw new Error(`Complete nombre, apellido, ${st.document_label || 'documento'}, telefono y direccion.`);
   if (st.country === 'CL' && !validateRutLocal(rut)) throw new Error('Ingrese un RUT valido.');
