@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -10,52 +11,32 @@ const morgan = require('morgan');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
+const WC_URL = String(process.env.WC_URL || '').replace(/\/$/, '');
+const FLOW_API_URL = String(process.env.FLOW_API_URL || 'https://sandbox.flow.cl/api').replace(/\/$/, '');
+const CHATWOOT_URL = String(process.env.CHATWOOT_URL || '').replace(/\/$/, '');
 
-const requiredEnv = [
-  'PANEL_USER',
-  'PANEL_PASSWORD',
-  'WC_URL',
-  'WC_KEY',
-  'WC_SECRET',
-  'FLOW_API_URL',
-  'FLOW_API_KEY',
-  'FLOW_SECRET_KEY',
-  'CHATWOOT_URL',
-  'CHATWOOT_API_KEY',
-  'CHATWOOT_ACCOUNT_ID'
-];
-
+const requiredEnv = ['PANEL_USER','PANEL_PASSWORD','WC_URL','WC_KEY','WC_SECRET'];
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
-if (missingEnv.length) {
-  console.warn(`[WARN] Variables faltantes en .env: ${missingEnv.join(', ')}`);
-}
+if (missingEnv.length) console.warn(`[WARN] Variables faltantes: ${missingEnv.join(', ')}`);
 
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((x) => x.trim()).filter(Boolean);
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '3mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('combined'));
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error('Origen no permitido por CORS'));
-    },
-    credentials: true
-  })
-);
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error('Origen no permitido por CORS'));
+  },
+  credentials: true
+}));
 
 function safeCompare(a = '', b = '') {
-  const bufferA = Buffer.from(String(a));
-  const bufferB = Buffer.from(String(b));
-  if (bufferA.length !== bufferB.length) return false;
-  return crypto.timingSafeEqual(bufferA, bufferB);
+  const A = Buffer.from(String(a));
+  const B = Buffer.from(String(b));
+  if (A.length !== B.length) return false;
+  return crypto.timingSafeEqual(A, B);
 }
 
 function basicAuth(req, res, next) {
@@ -64,336 +45,299 @@ function basicAuth(req, res, next) {
     res.set('WWW-Authenticate', 'Basic realm="Chatwoot WooCommerce Panel"');
     return res.status(401).json({ error: 'Credenciales requeridas' });
   }
-
-  let user = '';
-  let pass = '';
   try {
-    const decoded = Buffer.from(auth.replace('Basic ', ''), 'base64').toString('utf8');
-    const separatorIndex = decoded.indexOf(':');
-    user = decoded.slice(0, separatorIndex);
-    pass = decoded.slice(separatorIndex + 1);
-  } catch (error) {
+    const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
+    const [user, ...rest] = decoded.split(':');
+    const pass = rest.join(':');
+    if (!safeCompare(user, process.env.PANEL_USER) || !safeCompare(pass, process.env.PANEL_PASSWORD)) {
+      return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
+    }
+    req.panelUser = user;
+    return next();
+  } catch (_) {
     return res.status(401).json({ error: 'Credenciales inválidas' });
   }
-
-  const validUser = safeCompare(user, process.env.PANEL_USER);
-  const validPass = safeCompare(pass, process.env.PANEL_PASSWORD);
-  if (!validUser || !validPass) {
-    return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
-  }
-
-  req.panelUser = user;
-  return next();
 }
 
 app.use(basicAuth);
 app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
 
 const wc = axios.create({
-  baseURL: `${String(process.env.WC_URL).replace(/\/$/, '')}/wp-json/wc/v3`,
-  auth: {
-    username: process.env.WC_KEY,
-    password: process.env.WC_SECRET
-  },
-  timeout: 20000
+  baseURL: `${WC_URL}/wp-json/wc/v3`,
+  auth: { username: process.env.WC_KEY, password: process.env.WC_SECRET },
+  timeout: 30000
 });
 
-const chatwoot = axios.create({
-  baseURL: `${String(process.env.CHATWOOT_URL).replace(/\/$/, '')}/api/v1/accounts/${process.env.CHATWOOT_ACCOUNT_ID}`,
-  headers: {
-    api_access_token: process.env.CHATWOOT_API_KEY,
-    'Content-Type': 'application/json'
-  },
-  timeout: 20000
-});
+function chatwootClient() {
+  if (!CHATWOOT_URL || !process.env.CHATWOOT_API_KEY || !process.env.CHATWOOT_ACCOUNT_ID) return null;
+  return axios.create({
+    baseURL: `${CHATWOOT_URL}/api/v1/accounts/${process.env.CHATWOOT_ACCOUNT_ID}`,
+    headers: { api_access_token: process.env.CHATWOOT_API_KEY, 'Content-Type': 'application/json' },
+    timeout: 20000
+  });
+}
 
 function formatWooError(error) {
-  const response = error.response;
-  if (!response) return error.message;
-  return response.data?.message || response.data?.error || `Error HTTP ${response.status}`;
+  const data = error.response?.data;
+  return data?.message || data?.error || error.message || 'Error inesperado';
+}
+
+function normalizeText(value = '') {
+  return String(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+function loadComunas() {
+  const csvPath = path.join(__dirname, 'data', 'starter-comunas-chile.csv');
+  if (!fs.existsSync(csvPath)) return [];
+  const rows = fs.readFileSync(csvPath, 'utf8').split(/\r?\n/).slice(1).filter(Boolean);
+  return rows.map((line) => {
+    const [comuna, postcode] = line.split(',');
+    return { comuna: (comuna || '').trim(), postcode: (postcode || '').trim() };
+  }).filter((x) => x.comuna && x.postcode);
+}
+const comunas = loadComunas();
+const comunaMap = new Map(comunas.map((x) => [normalizeText(x.comuna), x.postcode]));
+function getPostcode(comuna, fallback = '8320000') { return comunaMap.get(normalizeText(comuna)) || fallback; }
+
+function validateRut(rut = '') {
+  const clean = String(rut).replace(/\./g, '').replace(/-/g, '').trim().toUpperCase();
+  if (!/^[0-9]+[0-9K]$/.test(clean)) return false;
+  const body = clean.slice(0, -1);
+  const dv = clean.slice(-1);
+  let sum = 0, multiplier = 2;
+  for (let i = body.length - 1; i >= 0; i -= 1) {
+    sum += Number(body[i]) * multiplier;
+    multiplier = multiplier === 7 ? 2 : multiplier + 1;
+  }
+  const expectedNum = 11 - (sum % 11);
+  const expected = expectedNum === 11 ? '0' : expectedNum === 10 ? 'K' : String(expectedNum);
+  return dv === expected;
+}
+function formatRut(rut = '') {
+  const clean = String(rut).replace(/\./g, '').replace(/-/g, '').trim().toUpperCase();
+  if (clean.length < 2) return rut;
+  return `${clean.slice(0, -1).replace(/\B(?=(\d{3})+(?!\d))/g, '.')}-${clean.slice(-1)}`;
 }
 
 function flowSign(params) {
-  const sortedKeys = Object.keys(params).sort();
-  const toSign = sortedKeys.map((key) => `${key}${params[key]}`).join('');
-  return crypto.createHmac('sha256', process.env.FLOW_SECRET_KEY).update(toSign).digest('hex');
+  const toSign = Object.keys(params).sort().map((key) => `${key}${params[key]}`).join('');
+  return crypto.createHmac('sha256', process.env.FLOW_SECRET_KEY || '').update(toSign).digest('hex');
+}
+function buildFlowPayload(params) { const p = { ...params }; p.s = flowSign(p); return new URLSearchParams(p).toString(); }
+
+function extractMeta(metaData = []) {
+  const result = {};
+  for (const m of metaData || []) {
+    const key = String(m.key || '').toLowerCase();
+    if (key.includes('alids') || key.includes('alidropship') || key.includes('ali') || key.includes('rut') || key.includes('tracking') || key.includes('supplier')) {
+      result[m.key] = m.value;
+    }
+  }
+  return result;
 }
 
-function buildFlowPayload(params) {
-  const payload = { ...params };
-  payload.s = flowSign(payload);
-  return new URLSearchParams(payload).toString();
+function normalizeProduct(product, variations = []) {
+  return {
+    id: product.id,
+    type: product.type,
+    nombre: product.name,
+    descripcion_corta: product.short_description?.replace(/<[^>]*>/g, '').trim() || '',
+    sku: product.sku || 'Sin SKU',
+    precio: product.price || product.regular_price || '0',
+    precio_regular: product.regular_price || '',
+    precio_oferta: product.sale_price || '',
+    moneda: 'CLP',
+    stock: product.stock_quantity,
+    stock_status: product.stock_status,
+    manage_stock: product.manage_stock,
+    imagen: product.images?.[0]?.src || '',
+    imagenes: product.images?.map((img) => ({ id: img.id, src: img.src, alt: img.alt })) || [],
+    permalink: product.permalink,
+    categorias: product.categories?.map((c) => c.name) || [],
+    etiquetas: product.tags?.map((t) => t.name) || [],
+    atributos: product.attributes?.map((a) => ({ id: a.id, name: a.name, options: a.options || [], variation: a.variation })) || [],
+    meta: extractMeta(product.meta_data),
+    variations
+  };
+}
+
+async function getAllProducts() {
+  const productos = [];
+  let page = 1;
+  while (true) {
+    const { data } = await wc.get('/products', { params: { per_page: 100, page, status: 'publish' } });
+    productos.push(...data);
+    if (data.length < 100) break;
+    page += 1;
+  }
+  return productos;
+}
+
+async function getVariations(productId) {
+  const variations = [];
+  let page = 1;
+  while (true) {
+    const { data } = await wc.get(`/products/${productId}/variations`, { params: { per_page: 100, page } });
+    variations.push(...data);
+    if (data.length < 100) break;
+    page += 1;
+  }
+  return variations.map((v) => ({
+    id: v.id,
+    sku: v.sku || '',
+    precio: v.price || v.regular_price || '0',
+    precio_regular: v.regular_price || '',
+    precio_oferta: v.sale_price || '',
+    stock: v.stock_quantity,
+    stock_status: v.stock_status,
+    manage_stock: v.manage_stock,
+    imagen: v.image?.src || '',
+    atributos: v.attributes?.map((a) => ({ name: a.name, option: a.option })) || [],
+    meta: extractMeta(v.meta_data)
+  }));
 }
 
 async function validateStock(lineItems = []) {
-  if (!Array.isArray(lineItems) || lineItems.length === 0) {
-    const error = new Error('Debe incluir al menos un producto');
-    error.status = 400;
-    throw error;
-  }
-
-  const validation = [];
+  if (!Array.isArray(lineItems) || !lineItems.length) { const e = new Error('Debe incluir al menos un producto'); e.status = 400; throw e; }
   for (const item of lineItems) {
     const productId = Number(item.product_id);
-    const quantity = Number(item.quantity || 0);
-
-    if (!productId || quantity <= 0) {
-      const error = new Error('Producto o cantidad inválida');
-      error.status = 400;
-      throw error;
+    const variationId = Number(item.variation_id || 0);
+    const qty = Number(item.quantity || 0);
+    if (!productId || qty <= 0) { const e = new Error('Producto o cantidad inválida'); e.status = 400; throw e; }
+    const endpoint = variationId ? `/products/${productId}/variations/${variationId}` : `/products/${productId}`;
+    const { data: product } = await wc.get(endpoint);
+    if (product.stock_status !== 'instock') { const e = new Error(`Sin stock disponible para ${product.name || 'variación'}`); e.status = 409; throw e; }
+    if (product.manage_stock && product.stock_quantity !== null && qty > Number(product.stock_quantity)) {
+      const e = new Error(`Stock insuficiente. Disponible: ${product.stock_quantity}`); e.status = 409; throw e;
     }
-
-    const { data: product } = await wc.get(`/products/${productId}`);
-    const stockQuantity = product.stock_quantity;
-    const managesStock = Boolean(product.manage_stock);
-    const inStock = product.stock_status === 'instock';
-
-    if (!inStock) {
-      const error = new Error(`Sin stock disponible para ${product.name}`);
-      error.status = 409;
-      throw error;
-    }
-
-    if (managesStock && stockQuantity !== null && quantity > Number(stockQuantity)) {
-      const error = new Error(`Stock insuficiente para ${product.name}. Disponible: ${stockQuantity}`);
-      error.status = 409;
-      throw error;
-    }
-
-    validation.push({ product_id: productId, quantity, name: product.name, price: product.price });
   }
-
-  return validation;
 }
 
 function normalizeCheckout(body) {
-  const required = ['billing', 'shipping', 'line_items', 'payment_method', 'payment_method_title'];
-  for (const field of required) {
-    if (!body[field]) {
-      const error = new Error(`Falta el campo requerido: ${field}`);
-      error.status = 400;
-      throw error;
-    }
-  }
-
+  const rut = String(body.rut || body.billing?.rut || '').trim();
+  if (process.env.REQUIRE_RUT !== 'false' && !validateRut(rut)) { const e = new Error('RUT chileno inválido o faltante'); e.status = 400; throw e; }
+  const billing = { ...(body.billing || {}) };
+  const shipping = { ...(body.shipping || billing) };
+  const comuna = body.comuna || billing.city || shipping.city;
+  const postcode = body.postcode || getPostcode(comuna, process.env.DEFAULT_POSTCODE || '8320000');
+  billing.country = 'CL'; shipping.country = 'CL';
+  billing.postcode = postcode; shipping.postcode = postcode;
+  billing.city = comuna || billing.city; shipping.city = comuna || shipping.city;
   return {
-    payment_method: body.payment_method,
-    payment_method_title: body.payment_method_title,
+    payment_method: body.payment_method || 'flow',
+    payment_method_title: body.payment_method_title || 'Flow - Webpay / Multicaja',
     set_paid: false,
     status: body.status || 'pending',
-    billing: body.billing,
-    shipping: body.shipping,
-    line_items: body.line_items.map((item) => ({
-      product_id: Number(item.product_id),
-      variation_id: item.variation_id ? Number(item.variation_id) : undefined,
-      quantity: Number(item.quantity)
-    })),
+    billing,
+    shipping,
+    line_items: (body.line_items || []).map((i) => ({ product_id: Number(i.product_id), variation_id: i.variation_id ? Number(i.variation_id) : undefined, quantity: Number(i.quantity) })),
     shipping_lines: body.shipping_lines || [],
     customer_note: body.customer_note || '',
     meta_data: [
       ...(body.meta_data || []),
+      { key: '_billing_rut', value: formatRut(rut) },
+      { key: 'rut', value: formatRut(rut) },
+      { key: '_billing_comuna', value: comuna || '' },
+      { key: '_shipping_comuna', value: comuna || '' },
       { key: '_origen_pedido', value: 'Chatwoot WooCommerce Flow Panel' }
     ]
   };
 }
 
-app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel' });
-});
+app.get('/health', (req, res) => res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-pro' }));
+app.get('/comunas', (req, res) => res.json({ comunas }));
+app.get('/validar-rut', (req, res) => res.json({ rut: formatRut(req.query.rut || ''), valido: validateRut(req.query.rut || '') }));
 
 app.get('/cliente', async (req, res, next) => {
   try {
-    const email = String(req.query.email || '').trim().toLowerCase();
+    const email = String(req.query.email || req.query.email_cliente || '').trim().toLowerCase();
     if (!email) return res.status(400).json({ error: 'Debe indicar email del cliente' });
-
     const { data: customers } = await wc.get('/customers', { params: { email, per_page: 1 } });
     const customer = customers[0] || null;
-
-    const { data: orders } = await wc.get('/orders', {
-      params: {
-        search: email,
-        per_page: 20,
-        orderby: 'date',
-        order: 'desc'
-      }
-    });
-
+    const { data: orders } = await wc.get('/orders', { params: { search: email, per_page: 30, orderby: 'date', order: 'desc' } });
+    const billing = customer?.billing || {};
+    const rutMeta = customer?.meta_data?.find((m) => String(m.key).toLowerCase().includes('rut'))?.value || '';
     res.json({
-      cliente: customer
-        ? {
-            id: customer.id,
-            nombre: `${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
-            email: customer.email,
-            telefono: customer.billing?.phone || '',
-            direccion: customer.billing || {}
-          }
-        : { nombre: '', email, telefono: '', direccion: {} },
+      cliente: customer ? {
+        id: customer.id,
+        nombre: `${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
+        email: customer.email,
+        telefono: billing.phone || '',
+        rut: rutMeta || billing.rut || '',
+        direccion: billing,
+        meta: extractMeta(customer.meta_data)
+      } : { nombre: '', email, telefono: '', rut: '', direccion: {} },
       pedidos: orders.map((order) => ({
-        id: order.id,
-        numero: order.number,
-        estado: order.status,
-        total: order.total,
-        moneda: order.currency || 'CLP',
-        fecha: order.date_created,
-        metodo_pago: order.payment_method_title,
-        productos: order.line_items?.map((item) => ({ nombre: item.name, cantidad: item.quantity, total: item.total })) || []
+        id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', fecha: order.date_created,
+        metodo_pago: order.payment_method_title, rut: order.meta_data?.find((m) => String(m.key).toLowerCase().includes('rut'))?.value || '',
+        productos: order.line_items?.map((item) => ({ nombre: item.name, cantidad: item.quantity, total: item.total, sku: item.sku, meta: item.meta_data })) || [],
+        meta: extractMeta(order.meta_data)
       }))
     });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 app.get('/productos', async (req, res, next) => {
   try {
-    const productos = [];
-    let page = 1;
-    const perPage = 100;
-
-    while (true) {
-      const { data } = await wc.get('/products', {
-        params: { per_page: perPage, page, status: 'publish' }
-      });
-      productos.push(...data);
-      if (data.length < perPage) break;
-      page += 1;
+    const includeVariations = req.query.variations !== 'false';
+    const products = await getAllProducts();
+    const normalized = [];
+    for (const p of products) {
+      const variations = includeVariations && p.type === 'variable' ? await getVariations(p.id) : [];
+      normalized.push(normalizeProduct(p, variations));
     }
-
-    res.json({
-      productos: productos.map((product) => ({
-        id: product.id,
-        nombre: product.name,
-        sku: product.sku || 'Sin SKU',
-        precio: product.price || product.regular_price || '0',
-        moneda: 'CLP',
-        stock: product.stock_quantity,
-        stock_status: product.stock_status,
-        manage_stock: product.manage_stock,
-        imagen: product.images?.[0]?.src || '',
-        permalink: product.permalink
-      }))
-    });
-  } catch (error) {
-    next(error);
-  }
+    res.json({ productos: normalized });
+  } catch (error) { next(error); }
 });
 
 app.post('/crear-pedido', async (req, res, next) => {
   try {
-    const orderPayload = normalizeCheckout(req.body);
-    await validateStock(orderPayload.line_items);
-
-    const { data: order } = await wc.post('/orders', orderPayload);
-    res.status(201).json({
-      ok: true,
-      pedido: {
-        id: order.id,
-        numero: order.number,
-        estado: order.status,
-        total: order.total,
-        moneda: order.currency || 'CLP',
-        checkout_url: order.payment_url || order.checkout_payment_url || ''
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
+    const payload = normalizeCheckout(req.body);
+    await validateStock(payload.line_items);
+    const { data: order } = await wc.post('/orders', payload);
+    res.status(201).json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', checkout_url: order.payment_url || order.checkout_payment_url || '' } });
+  } catch (error) { next(error); }
 });
 
 app.post('/pagar', async (req, res, next) => {
   try {
+    if (!process.env.FLOW_API_KEY || !process.env.FLOW_SECRET_KEY) return res.status(400).json({ error: 'Faltan credenciales Flow' });
     const { orderId, amount, subject, email } = req.body;
-    if (!orderId || !amount || !email) {
-      return res.status(400).json({ error: 'orderId, amount y email son obligatorios' });
-    }
-
-    const commerceOrder = `${orderId}-${Date.now()}`;
+    if (!orderId || !amount || !email) return res.status(400).json({ error: 'orderId, amount y email son obligatorios' });
     const publicBase = String(process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
-    const params = {
-      apiKey: process.env.FLOW_API_KEY,
-      commerceOrder,
-      subject: subject || `Pedido WooCommerce #${orderId}`,
-      currency: process.env.FLOW_CURRENCY || 'CLP',
-      amount: Math.round(Number(amount)),
-      email,
-      paymentMethod: process.env.FLOW_PAYMENT_METHOD || '9',
-      urlConfirmation: process.env.FLOW_URL_CONFIRMATION || `${publicBase}/flow/confirmacion`,
-      urlReturn: process.env.FLOW_URL_RETURN || `${publicBase}/flow/retorno`,
-      optional: JSON.stringify({ orderId })
-    };
-
-    const body = buildFlowPayload(params);
-    const { data } = await axios.post(`${String(process.env.FLOW_API_URL).replace(/\/$/, '')}/payment/create`, body, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      timeout: 20000
-    });
-
-    if (!data?.url || !data?.token) {
-      return res.status(502).json({ error: 'Flow no retornó URL/token de pago', detalle: data });
-    }
-
-    res.json({
-      ok: true,
-      url: `${data.url}?token=${data.token}`,
-      token: data.token,
-      flow_order: data.flowOrder || null,
-      commerce_order: commerceOrder
-    });
-  } catch (error) {
-    next(error);
-  }
+    const params = { apiKey: process.env.FLOW_API_KEY, commerceOrder: `${orderId}-${Date.now()}`, subject: subject || `Pedido WooCommerce #${orderId}`, currency: 'CLP', amount: Math.round(Number(amount)), email, paymentMethod: process.env.FLOW_PAYMENT_METHOD || '9', urlConfirmation: process.env.FLOW_URL_CONFIRMATION || `${publicBase}/flow/confirmacion`, urlReturn: process.env.FLOW_URL_RETURN || `${publicBase}/flow/retorno`, optional: JSON.stringify({ orderId }) };
+    const { data } = await axios.post(`${FLOW_API_URL}/payment/create`, buildFlowPayload(params), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 20000 });
+    if (!data?.url || !data?.token) return res.status(502).json({ error: 'Flow no retornó URL/token', detalle: data });
+    res.json({ ok: true, url: `${data.url}?token=${data.token}`, token: data.token, flow_order: data.flowOrder || null });
+  } catch (error) { next(error); }
 });
 
 app.post('/chatwoot/enviar-producto', async (req, res, next) => {
   try {
-    const { conversationId, product, quantity = 1 } = req.body;
-    if (!conversationId || !product?.nombre) {
-      return res.status(400).json({ error: 'conversationId y product son obligatorios' });
-    }
-
-    const content = [
-      `Producto seleccionado desde panel: ${product.nombre}`,
-      `SKU: ${product.sku || 'Sin SKU'}`,
-      `Precio: $${Number(product.precio || 0).toLocaleString('es-CL')} CLP`,
-      `Cantidad: ${quantity}`,
-      product.permalink ? `Link: ${product.permalink}` : ''
-    ]
-      .filter(Boolean)
-      .join('\n');
-
-    const { data } = await chatwoot.post(`/conversations/${conversationId}/messages`, {
-      content,
-      message_type: 'outgoing',
-      private: false
-    });
-
+    const client = chatwootClient();
+    if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
+    const { conversationId, product, variation, quantity = 1, privateNote = false } = req.body;
+    if (!conversationId || !product?.nombre) return res.status(400).json({ error: 'conversationId y product son obligatorios' });
+    const attrs = variation?.atributos?.map((a) => `${a.name}: ${a.option}`).join(', ') || product.atributos?.filter((a) => !a.variation).map((a) => `${a.name}: ${a.options?.join('/')}`).join(', ');
+    const content = [`Producto seleccionado: ${product.nombre}`, variation ? `Variación: ${attrs || variation.sku || variation.id}` : attrs ? `Atributos: ${attrs}` : '', `SKU: ${variation?.sku || product.sku || 'Sin SKU'}`, `Precio: $${Number(variation?.precio || product.precio || 0).toLocaleString('es-CL')} CLP`, `Cantidad: ${quantity}`, product.permalink ? `Link: ${product.permalink}` : ''].filter(Boolean).join('\n');
+    const { data } = await client.post(`/conversations/${conversationId}/messages`, { content, message_type: 'outgoing', private: Boolean(privateNote) });
     res.json({ ok: true, message: data });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
-app.post('/flow/confirmacion', async (req, res) => {
-  // Flow enviará token a este endpoint. Aquí puedes consultar payment/getStatus y actualizar el pedido en WooCommerce.
-  console.log('Confirmacion Flow:', req.body);
-  res.sendStatus(200);
+app.post('/chatwoot/etiquetas', async (req, res, next) => {
+  try {
+    const client = chatwootClient();
+    if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
+    const { conversationId, labels = [] } = req.body;
+    if (!conversationId) return res.status(400).json({ error: 'conversationId obligatorio' });
+    const { data } = await client.post(`/conversations/${conversationId}/labels`, { labels });
+    res.json({ ok: true, labels: data });
+  } catch (error) { next(error); }
 });
 
-app.get('/flow/retorno', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'flow-retorno.html'));
-});
-
-app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint no encontrado' });
-});
-
-app.use((error, req, res, next) => {
-  const status = error.status || error.response?.status || 500;
-  const message = formatWooError(error);
-  console.error('[ERROR]', message, error.response?.data || '');
-  res.status(status).json({ error: message });
-});
-
-app.listen(PORT, () => {
-  console.log(`Panel activo en puerto ${PORT}`);
-});
+app.post('/flow/confirmacion', (req, res) => { console.log('Confirmacion Flow:', req.body); res.sendStatus(200); });
+app.get('/flow/retorno', (req, res) => res.sendFile(path.join(__dirname, 'public', 'flow-retorno.html')));
+app.use((req, res) => res.status(404).json({ error: 'Endpoint no encontrado' }));
+app.use((error, req, res, next) => { const status = error.status || error.response?.status || 500; const message = formatWooError(error); console.error('[ERROR]', message, error.response?.data || ''); res.status(status).json({ error: message }); });
+app.listen(PORT, () => console.log(`Panel robusto activo en puerto ${PORT}`));
