@@ -1,4 +1,4 @@
-// v8.3.1 UI estable: base v8.3 con cache/debug y deteccion segura por pais.
+// v8.3 UI: asistente por pais, prompts IA, cupon recomendado, pagos/envios Woo.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -182,11 +182,8 @@ function readUrlParams() {
   const p = new URLSearchParams(location.search);
   const token = p.get('panel_token') || p.get('token') || '';
   if (token) { state.panelToken = token; localStorage.setItem('panelToken', token); }
-  const rawEmail = p.get('email') || p.get('email_cliente') || p.get('customer_email') || p.get('contact_email') || '';
-  const rawConversationId = p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '';
-  const isPlaceholder = (v='') => /\{\{|\}\}/.test(String(v || ''));
-  const email = isPlaceholder(rawEmail) ? '' : rawEmail;
-  const conversationId = isPlaceholder(rawConversationId) ? '' : rawConversationId;
+  const email = p.get('email') || p.get('email_cliente') || p.get('customer_email') || p.get('contact_email') || '';
+  const conversationId = p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '';
   if (email && $('customerEmail')) $('customerEmail').value = email;
   if (conversationId && $('conversationId')) $('conversationId').value = conversationId;
   if (email || conversationId) renderChatwootContext({ email, conversationId, name: '', phone: '', labels: [], customAttributes: {} }, 'URL');
@@ -307,7 +304,7 @@ async function changeStore(storeId) {
   await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); await loadProducts(true);
 }
 async function loadRegiones(force=false) {
-  const key = `regiones_${state.activeStore}_v831`;
+  const key = `regiones_${state.activeStore}_v83`;
   const cached = !force && readLocal(key, 86400000 * 30);
   if (cached) { state.regiones = cached; renderRegionOptions(); return; }
   const data = await api('/regiones'); state.regiones = data.regiones || []; saveLocal(key, state.regiones); renderRegionOptions();
@@ -563,12 +560,7 @@ function renderProducts() {
   setMetric('metricProducts', state.productos.length);
   const vCount = state.productos.reduce((s,p)=>s+Number(p.variation_count || (p.variations||[]).length || 0),0);
   setMetric('metricVariations', vCount);
-  if (!state.productos.length) {
-    $('productsList').innerHTML = '<span class="muted">No hay productos para mostrar.</span>';
-    if ($('loadMoreInfo')) $('loadMoreInfo').textContent = `0/${state.productTotal || 0} productos`;
-    $('loadMoreBtn').classList.add('hidden');
-    return;
-  }
+  if (!state.productos.length) { $('productsList').innerHTML = '<span class="muted">No hay productos para mostrar.</span>'; $('loadMoreBtn').classList.add('hidden'); return; }
   $('productsList').innerHTML = state.productos.map(renderProductCard).join('');
   $('loadMoreInfo').textContent = `${state.productos.length}/${state.productTotal || state.productos.length} productos`;
   $('loadMoreBtn').classList.toggle('hidden', !(state.productos.length < state.productTotal || state.productos.length % state.productLimit === 0));
@@ -1184,7 +1176,7 @@ ${JSON.stringify(data, null, 2)}`);
   }
 }
 
-async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v831`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
+async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v83`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/stores'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('openSettingsBtn')?.addEventListener('click', () => toggleSettings(true));
 $('closeSettingsBtn')?.addEventListener('click', () => toggleSettings(false));

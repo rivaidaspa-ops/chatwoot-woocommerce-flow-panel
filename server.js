@@ -13,9 +13,6 @@ const { Pool } = require('pg');
 const FormData = require('form-data');
 
 const app = express();
-app.disable('etag');
-const APP_VERSION = '8.3.1';
-const APP_NAME = 'Rivaida Commerce Hub';
 const PORT = Number(process.env.PORT || 3001);
 const WC_URL = String(process.env.WC_URL || '').replace(/\/$/, '');
 const FLOW_API_URL = String(process.env.FLOW_API_URL || 'https://www.flow.cl/api').replace(/\/$/, '');
@@ -108,13 +105,12 @@ function buildStoreConfig() {
   return merged;
 }
 let STORE_CONFIG = buildStoreConfig();
-function normalizeStoreId(input='') { const raw=String(input||'').trim().toLowerCase(); if(['co','colombia','cop','57','+57'].includes(raw)) return 'co'; if(['cl','chile','clp','56','+56'].includes(raw)) return 'cl'; return raw || 'cl'; }
-function currentDefaultStore() { return normalizeStoreId(getCfg('DEFAULT_STORE','cl')); }
+function currentDefaultStore() { return String(getCfg('DEFAULT_STORE','cl')).toLowerCase(); }
 const wcClients = new Map();
 function rebuildRuntimeConfig() { STORE_CONFIG = buildStoreConfig(); wcClients.clear(); allowedOrigins = parseAllowedOrigins(); }
 
 function listStores() { return Object.values(STORE_CONFIG).map((s)=>({ id:s.id, code:s.code, name:s.name, country:s.country, currency:s.currency, document_label:s.document_label, document_type:s.document_type, payment_gateway_id:s.payment_gateway_id, payment_presets:s.payment_presets||[], enabled:Boolean(s.wc_url&&s.wc_key&&s.wc_secret) })); }
-function resolveStore(input='') { const raw=normalizeStoreId(input); return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>normalizeStoreId(s.country || s.code || s.id) === raw) || STORE_CONFIG[currentDefaultStore()] || Object.values(STORE_CONFIG)[0]; }
+function resolveStore(input='') { const raw=String(input||'').trim().toLowerCase(); return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>String(s.country||s.code).toLowerCase()===raw) || STORE_CONFIG[currentDefaultStore()] || Object.values(STORE_CONFIG)[0]; }
 function storeFromReq(req) { return resolveStore(req.query.store || req.query.country || req.body?.store_id || req.body?.store || req.body?.country || req.headers['x-store-id'] || currentDefaultStore()); }
 function missingWooFields(st = {}) {
   const missing = [];
@@ -224,7 +220,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.3.1-stable', app_name: APP_NAME, version: APP_VERSION, port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.3-ai-country-coupons', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -824,17 +820,6 @@ app.post('/flow/confirmacion', (req, res) => res.status(200).send('OK'));
 
 app.use(authMiddleware);
 
-
-app.use((req, res, next) => {
-  if (/^\/(productos|stores|paises|categorias|payment-methods|shipping-methods|admin\/settings|diagnostics|cache)/.test(req.path)) {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    res.set('Surrogate-Control', 'no-store');
-  }
-  next();
-});
-
 app.get('/admin/settings', async (req, res) => {
   res.json({ ok:true, settings: readRuntimeSettings(), stores: listStores(), postgres: dbReady, redis: redisReady });
 });
@@ -920,7 +905,7 @@ app.get('/productos/search', async (req, res, next) => {
   try {
     const params = { q: String(req.query.q || '').trim(), category: String(req.query.category || '').trim(), sale: req.query.sale === 'true', stock: String(req.query.stock || ''), limit: Math.min(Number(req.query.limit || PRODUCT_PAGE_SIZE), MAX_PAGE_SIZE), offset: Number(req.query.offset || 0) };
     const st = storeFromReq(req);
-    const cacheKey = `productos:${st.id}:search:${hashKey(JSON.stringify({ ...params, store: st.id, v: APP_VERSION }))}`;
+    const cacheKey = `productos:${st.id}:search:${hashKey(JSON.stringify(params))}`;
     const force = req.query.refresh === 'true';
     const result = await remember(cacheKey, PAGE_CACHE_SECONDS, async () => {
       let found = await searchProductsIndex(params, st);
@@ -933,58 +918,6 @@ app.get('/productos/search', async (req, res, next) => {
     res.json({ ...result.value, store:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count: await productIndexCount(st.id), sync:syncJob });
   } catch (error) { next(error); }
 });
-
-app.get('/productos/debug', async (req, res, next) => {
-  try {
-    const st = storeFromReq(req);
-    const index_count = await productIndexCount(st.id);
-    let sample = [];
-    if (pgPool && dbReady) {
-      const { rows } = await pgPool.query(`SELECT id,nombre,sku,stock_status,store_id,precio,payload FROM product_index WHERE store_id=$1 ORDER BY CASE WHEN stock_status='instock' THEN 0 ELSE 1 END, nombre ASC LIMIT 8`, [st.id]);
-      sample = rows.map((r) => ({ id:r.id, nombre:r.nombre, sku:r.sku, stock_status:r.stock_status, store_id:r.store_id, precio:r.precio, payload_store:r.payload?.store_id || '', payload_country:r.payload?.country || '' }));
-    }
-    res.json({ ok:true, version:APP_VERSION, store:st.id, country:st.country, currency:st.currency, enabled:Boolean(st.wc_url && st.wc_key && st.wc_secret), index_count, sample, sync:syncJob });
-  } catch (error) { next(error); }
-});
-
-app.post('/admin/db/clear-product-index', async (req, res, next) => {
-  try {
-    if (!pgPool || !dbReady) return res.status(500).json({ error:'Postgres no disponible' });
-    const st = storeFromReq(req);
-    const all = String(req.query.all || req.body?.all || '').toLowerCase() === 'true';
-    let deleted = 0;
-    if (all) {
-      const r = await pgPool.query('DELETE FROM product_index');
-      deleted = r.rowCount || 0;
-    } else {
-      const r = await pgPool.query('DELETE FROM product_index WHERE store_id=$1', [st.id]);
-      deleted = r.rowCount || 0;
-    }
-    memoryCache.clear();
-    await cacheDelPrefix('productos:');
-    res.json({ ok:true, version:APP_VERSION, cleared: all ? 'all' : st.id, deleted, message:'Índice de productos borrado. Ahora sincroniza catálogo para reconstruirlo.' });
-  } catch (error) { next(error); }
-});
-
-app.get('/admin/db/clear-product-index', async (req, res, next) => {
-  try {
-    if (!pgPool || !dbReady) return res.status(500).json({ error:'Postgres no disponible' });
-    const st = storeFromReq(req);
-    const all = String(req.query.all || '').toLowerCase() === 'true';
-    let deleted = 0;
-    if (all) {
-      const r = await pgPool.query('DELETE FROM product_index');
-      deleted = r.rowCount || 0;
-    } else {
-      const r = await pgPool.query('DELETE FROM product_index WHERE store_id=$1', [st.id]);
-      deleted = r.rowCount || 0;
-    }
-    memoryCache.clear();
-    await cacheDelPrefix('productos:');
-    res.json({ ok:true, version:APP_VERSION, cleared: all ? 'all' : st.id, deleted, message:'Índice de productos borrado. Ahora sincroniza catálogo para reconstruirlo.' });
-  } catch (error) { next(error); }
-});
-
 app.get('/productos/:id/variaciones', async (req, res, next) => {
   try {
     const force = req.query.refresh === 'true';
@@ -1557,5 +1490,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`${APP_NAME} v${APP_VERSION} activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.3 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });
