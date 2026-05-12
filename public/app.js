@@ -1,4 +1,4 @@
-// v8.2 UI: cupones, regiones/ciudades CL-CO, códigos postales, stock primero y contraste corregido.
+// v8.3 UI: asistente por pais, prompts IA, cupon recomendado, pagos/envios Woo.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -304,7 +304,7 @@ async function changeStore(storeId) {
   await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); await loadProducts(true);
 }
 async function loadRegiones(force=false) {
-  const key = `regiones_${state.activeStore}_v82`;
+  const key = `regiones_${state.activeStore}_v83`;
   const cached = !force && readLocal(key, 86400000 * 30);
   if (cached) { state.regiones = cached; renderRegionOptions(); return; }
   const data = await api('/regiones'); state.regiones = data.regiones || []; saveLocal(key, state.regiones); renderRegionOptions();
@@ -720,6 +720,27 @@ async function validateCoupon() {
   renderCart();
   notifySuccess('Cupón válido', `${data.coupon.code} · ${data.coupon.discount_type} · ${data.coupon.amount}`);
 }
+
+function makeCouponCode(prefix='RIVAIDA') {
+  return `${prefix}${Math.floor(1000 + Math.random()*9000)}`;
+}
+async function suggestCoupon() {
+  if (!state.recommendations) {
+    await recommendLabels();
+  }
+  const st = currentStore();
+  const rec = state.recommendations?.coupon_suggestion || {};
+  const total = state.cart.reduce((sum, item) => sum + Number(item.variation?.precio || item.product?.precio || 0) * Number(item.quantity || 1), 0);
+  const prefix = st.country === 'CO' ? 'CO' : 'CL';
+  const ship = selectedShippingLine();
+  const freeShip = rec.free_shipping || (ship && (Number(ship.total || 0) === 0 || /gratis|free/i.test(`${ship.method_title || ''}`)));
+  if ($('newCouponCode')) $('newCouponCode').value = rec.code || makeCouponCode(prefix);
+  if ($('newCouponType')) $('newCouponType').value = rec.discount_type || 'percent';
+  if ($('newCouponAmount')) $('newCouponAmount').value = rec.amount || (total >= (st.country === 'CO' ? 250000 : 80000) ? '10' : '5');
+  if ($('newCouponDescription')) $('newCouponDescription').value = rec.reason || `Cupón sugerido para cerrar venta ${st.country}.`;
+  if ($('newCouponFreeShipping')) $('newCouponFreeShipping').checked = Boolean(freeShip);
+  notifySuccess('Cupón recomendado generado', 'Revísalo y presiona Crear cupón si quieres guardarlo en WooCommerce.');
+}
 async function createCoupon() {
   const code = $('newCouponCode')?.value?.trim();
   const amount = $('newCouponAmount')?.value?.trim();
@@ -1017,17 +1038,26 @@ function updateTheme(mode, accent) {
 
 
 function recommendationPayload() {
+  const paymentOpt = $('paymentMethod')?.selectedOptions?.[0];
   return {
     cliente: state.cliente,
     pedidos: state.pedidos,
     cart: state.cart,
     email: $('customerEmail')?.value?.trim() || '',
     rut: $('billingRut')?.value?.trim() || '',
+    document: $('billingRut')?.value?.trim() || '',
     region: $('billingRegion')?.value || '',
     comuna: $('billingComuna')?.value || '',
+    city: $('billingComuna')?.value || '',
     conversationId: $('conversationId')?.value?.trim() || '',
     store: state.activeStore,
-    country: currentStore().country
+    country: currentStore().country,
+    payment: { method_id: $('paymentMethod')?.value || '', title: paymentOpt?.textContent || '' },
+    shipping: selectedShippingLine(),
+    payment_methods: state.paymentMethods || [],
+    shipping_methods: state.shippingMethods || [],
+    coupon: state.coupon,
+    totals: { cart: state.cart.reduce((sum, item) => sum + Number(item.variation?.precio || item.product?.precio || 0) * Number(item.quantity || 1), 0) }
   };
 }
 function renderRecommendations(rec) {
@@ -1035,7 +1065,11 @@ function renderRecommendations(rec) {
   if (!box) return;
   if (!rec) { box.className = 'recommendation-box muted'; box.textContent = 'Sin recomendaciones todavía.'; return; }
   box.className = 'recommendation-box';
-  box.innerHTML = `<div class="rec-labels">${(rec.labels || []).map(l => `<span>${text(l)}</span>`).join('')}</div><div class="rec-grid"><div><strong>Motivos</strong><ul>${(rec.reasons || []).map(r => `<li>${text(r)}</li>`).join('')}</ul></div><div><strong>Próximos pasos</strong><ul>${(rec.next_actions || []).map(r => `<li>${text(r)}</li>`).join('')}</ul></div></div><label>Respuesta sugerida<textarea id="suggestedMessageBox">${text(rec.suggested_message || '')}</textarea></label>${rec.ai ? '<p class="mini ok">IA conectada</p>' : '<p class="mini">Reglas locales</p>'}${rec.ai_error ? `<p class="mini bad">IA no disponible: ${text(rec.ai_error)}</p>` : ''}`;
+  const payments = (rec.available_payment_methods || []).map(m => `<span>${text(m.title || m.id)}</span>`).join('');
+  const shipping = (rec.available_shipping_methods || []).map(m => `<span>${text(m.title || m.id)}${Number(m.total || 0) === 0 ? ' · gratis' : ''}</span>`).join('');
+  const coupon = rec.coupon_suggestion ? `<div class="coupon-suggestion"><strong>Cupón sugerido:</strong> <code>${text(rec.coupon_suggestion.code)}</code> · ${text(rec.coupon_suggestion.amount)}${rec.coupon_suggestion.discount_type === 'percent' ? '%' : ''}${rec.coupon_suggestion.free_shipping ? ' · envío gratis' : ''}<br><small>${text(rec.coupon_suggestion.reason || '')}</small></div>` : '';
+  box.innerHTML = `<div class="assistant-head"><strong>${rec.country === 'CO' ? 'Asistente Colombia' : 'Asistente Chile'}</strong><span>${rec.ai ? 'IA conectada' : 'Reglas locales'}</span></div><div class="rec-labels">${(rec.labels || []).map(l => `<span>${text(l)}</span>`).join('')}</div><div class="rec-grid"><div><strong>Motivos</strong><ul>${(rec.reasons || []).map(r => `<li>${text(r)}</li>`).join('')}</ul></div><div><strong>Próximos pasos</strong><ul>${(rec.next_actions || []).map(r => `<li>${text(r)}</li>`).join('')}</ul></div></div>${coupon}<div class="method-chips"><div><strong>Pagos Woo:</strong> ${payments || '<em>Sin datos</em>'}</div><div><strong>Envíos Woo:</strong> ${shipping || '<em>Sin datos</em>'}</div></div><label>Respuesta sugerida<textarea id="suggestedMessageBox">${text(rec.suggested_message || '')}</textarea></label>${rec.ai_error ? `<p class="mini bad">IA no disponible: ${text(rec.ai_error)}</p>` : ''}`;
+  if (rec.coupon_suggestion && $('couponAiHint')) $('couponAiHint').textContent = `Sugerencia IA/reglas: ${rec.coupon_suggestion.code} · ${rec.coupon_suggestion.amount}${rec.coupon_suggestion.discount_type === 'percent' ? '%' : ''}`;
 }
 async function recommendLabels() {
   try {
@@ -1142,7 +1176,7 @@ ${JSON.stringify(data, null, 2)}`);
   }
 }
 
-async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v82`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
+async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v83`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/stores'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('openSettingsBtn')?.addEventListener('click', () => toggleSettings(true));
 $('closeSettingsBtn')?.addEventListener('click', () => toggleSettings(false));
@@ -1168,6 +1202,8 @@ $('copyPlatformJsonBtn')?.addEventListener('click', () => copyPlatformData('json
 $('sendSaleSummaryBtn')?.addEventListener('click', sendSaleSummaryToChat);
 $('billingRegion').addEventListener('change', () => renderComunas($('billingRegion').value));
 $('billingComuna').addEventListener('change', updatePostcode);
+$('shippingMethod')?.addEventListener('change', () => { renderCart(); if (state.recommendations) renderRecommendations(state.recommendations); });
+$('paymentMethod')?.addEventListener('change', () => { if (state.recommendations) renderRecommendations(state.recommendations); });
 $('billingRut').addEventListener('input', updateRutStatus);
 $('applyLabelsBtn').addEventListener('click', applyLabels);
 $('fetchChatwootContextBtn')?.addEventListener('click', () => enrichContextFromServer().catch(e => alert(e.message)));
@@ -1193,6 +1229,7 @@ $('validateCouponBtn')?.addEventListener('click', () => validateCoupon().catch(e
 $('clearCouponBtn')?.addEventListener('click', clearCoupon);
 $('createCouponBtn')?.addEventListener('click', () => createCoupon().catch(e => notifyError(e.message)));
 $('searchCouponsBtn')?.addEventListener('click', () => searchCoupons().catch(e => notifyError(e.message)));
+$('suggestCouponBtn')?.addEventListener('click', () => suggestCoupon().catch(e => notifyError(e.message)));
 $('closeVariationModalBtn')?.addEventListener('click', closeVariationModal);
 $('variationModalCancelBtn')?.addEventListener('click', closeVariationModal);
 $('variationBackdrop')?.addEventListener('click', closeVariationModal);

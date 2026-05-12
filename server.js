@@ -220,7 +220,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.2-coupons-regions-stock', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.3-ai-country-coupons', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -379,7 +379,7 @@ const CONFIG_KEYS = [
   'CO_COD_GATEWAY_ID','CO_COD_GATEWAY_TITLE','CO_WOMPI_GATEWAY_ID','CO_WOMPI_GATEWAY_TITLE','CO_BOLD_GATEWAY_ID','CO_BOLD_GATEWAY_TITLE','CO_PSE_GATEWAY_ID','CO_PSE_GATEWAY_TITLE','CO_MERCADO_PAGO_GATEWAY_ID','CO_MERCADO_PAGO_GATEWAY_TITLE','CO_EPAYCO_GATEWAY_ID','CO_EPAYCO_GATEWAY_TITLE','CO_PAYU_GATEWAY_ID','CO_PAYU_GATEWAY_TITLE','CO_BANK_TRANSFER_GATEWAY_ID','CO_BANK_TRANSFER_GATEWAY_TITLE','CO_PAYMENT_METHOD_PRESETS_JSON','CL_DEFAULT_SHIPPING_METHOD_ID','CL_DEFAULT_SHIPPING_METHOD_TITLE','CO_DEFAULT_SHIPPING_METHOD_ID','CO_DEFAULT_SHIPPING_METHOD_TITLE',
   'CHATWOOT_URL','CHATWOOT_API_KEY','CHATWOOT_ACCOUNT_ID',
   'PAYMENT_LINK_PROVIDER','FLOW_API_URL','FLOW_API_KEY','FLOW_SECRET_KEY','FLOW_URL_CONFIRMATION','FLOW_URL_RETURN','AI_RECOMMENDATION_WEBHOOK_URL',
-  'CACHE_TTL_SECONDS','PRODUCT_PAGE_SIZE','MAX_PAGE_SIZE','SYNC_PER_PAGE','VARIATION_CACHE_SECONDS','CHATWOOT_SEND_IMAGE_ATTACHMENT','CHATWOOT_INBOX_STORE_MAP','CL_CHATWOOT_INBOX_IDS','CO_CHATWOOT_INBOX_IDS','AUTO_STORE_BY_PHONE','AI_PROVIDER','OPENAI_API_KEY','OPENAI_MODEL','DEEPSEEK_API_KEY','DEEPSEEK_MODEL','GEMINI_API_KEY','GEMINI_MODEL'
+  'CACHE_TTL_SECONDS','PRODUCT_PAGE_SIZE','MAX_PAGE_SIZE','SYNC_PER_PAGE','VARIATION_CACHE_SECONDS','CHATWOOT_SEND_IMAGE_ATTACHMENT','CHATWOOT_INBOX_STORE_MAP','CL_CHATWOOT_INBOX_IDS','CO_CHATWOOT_INBOX_IDS','AUTO_STORE_BY_PHONE','AI_PROVIDER','OPENAI_API_KEY','OPENAI_MODEL','DEEPSEEK_API_KEY','DEEPSEEK_MODEL','GEMINI_API_KEY','GEMINI_MODEL','GLOBAL_AI_PROMPT','CL_AI_PROMPT','CO_AI_PROMPT','AI_TIMEOUT_MS'
 ];
 async function ensureAppSettingsTable() {
   if (!pgPool) return false;
@@ -692,48 +692,127 @@ async function validateStock(lineItems = [], store = resolveStore(currentDefault
 }
 
 
+function countryPrompt(country = 'CL') {
+  const globalPrompt = getCfg('GLOBAL_AI_PROMPT', 'Actua como asesor comercial experto para ecommerce, WooCommerce y atencion por WhatsApp. Debes ayudar al agente a cerrar la venta de forma clara, honesta y sin prometer stock o despacho que no este confirmado.');
+  const clPrompt = getCfg('CL_AI_PROMPT', 'Chile: validar RUT antes de crear pedido, usar comuna/region y codigo postal, recomendar link de pago WooCommerce con Flow cuando el pedido este confirmado. Mantener tono cordial chileno, precios en CLP y despacho segun metodos Woo disponibles.');
+  const coPrompt = getCfg('CO_AI_PROMPT', 'Colombia: validar documento CC/NIT, departamento/ciudad Dropi, telefono y direccion completa. Considerar contra entrega, Wompi, Bold, PSE u otros metodos Woo disponibles. Precios en COP y datos listos para copiar a Dropi.');
+  return [globalPrompt, String(country).toUpperCase() === 'CO' ? coPrompt : clPrompt].filter(Boolean).join('\n');
+}
+function normalizeLabelPart(value = '') { return normalizeText(value).replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,32); }
 function buildRecommendations(payload = {}) {
   const cliente = payload.cliente || {};
   const pedidos = Array.isArray(payload.pedidos) ? payload.pedidos : [];
   const cart = Array.isArray(payload.cart) ? payload.cart : [];
-  const rut = String(payload.rut || cliente.rut || '').trim();
-  const comuna = String(payload.comuna || cliente.direccion?.city || '').trim();
-  const region = String(payload.region || cliente.direccion?.region_codigo || cliente.direccion?.state || '').trim();
+  const country = String(payload.country || payload.store_country || '').toUpperCase() === 'CO' || String(payload.store || '').toLowerCase() === 'co' ? 'CO' : 'CL';
+  const st = resolveStore(country === 'CO' ? 'co' : 'cl');
+  const documentValue = String(payload.rut || payload.document || cliente.rut || cliente.document || '').trim();
+  const comuna = String(payload.comuna || payload.city || cliente.direccion?.city || '').trim();
+  const region = String(payload.region || payload.state || cliente.direccion?.region_codigo || cliente.direccion?.state || '').trim();
   const email = String(payload.email || cliente.email || '').trim();
-  const labels = new Set(['panel_chatwoot', 'woo_panel']);
+  const payment = payload.payment || {};
+  const shipping = payload.shipping || {};
+  const availablePayments = Array.isArray(payload.payment_methods) ? payload.payment_methods : [];
+  const availableShipping = Array.isArray(payload.shipping_methods) ? payload.shipping_methods : [];
+  const labels = new Set(['panel_chatwoot', 'woo_panel', country === 'CO' ? 'pais_colombia' : 'pais_chile']);
   const reasons = [];
-  if (rut && validateRut(rut)) { labels.add('rut_validado'); reasons.push('RUT validado correctamente.'); }
-  else { labels.add('rut_pendiente'); reasons.push('Conviene solicitar o validar RUT antes de crear el pedido.'); }
-  if (comuna) { labels.add(`comuna_${normalizeText(comuna).replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,32)}`); reasons.push(`Comuna detectada: ${comuna}.`); }
-  if (region) { labels.add(`region_${normalizeText(region).replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,32)}`); }
-  if (cart.length) { labels.add('carrito_activo'); reasons.push(`${cart.length} item(s) en carrito.`); }
-  if (pedidos.length) {
-    labels.add('cliente_recurrente');
-    const last = pedidos[0];
-    if (last?.estado) labels.add(`ultimo_pedido_${String(last.estado).replace(/[^a-z0-9_]+/gi,'_').toLowerCase()}`);
-    reasons.push('Cliente con historial de pedidos en WooCommerce.');
-  } else labels.add('cliente_nuevo');
+  const next = [];
+  if (country === 'CL') {
+    if (documentValue && validateRut(documentValue)) { labels.add('rut_validado'); reasons.push('RUT validado correctamente para Chile.'); }
+    else { labels.add('rut_pendiente'); reasons.push('Falta solicitar o validar RUT antes de crear el pedido chileno.'); next.push('Solicitar RUT valido'); }
+  } else {
+    if (documentValue) { labels.add('documento_colombia_ok'); reasons.push('Documento colombiano informado para Dropi/WooCommerce.'); }
+    else { labels.add('documento_colombia_pendiente'); reasons.push('Falta documento CC/NIT para la venta en Colombia.'); next.push('Solicitar CC/NIT'); }
+  }
+  if (comuna) { labels.add(`${country === 'CO' ? 'ciudad' : 'comuna'}_${normalizeLabelPart(comuna)}`); reasons.push(`${country === 'CO' ? 'Ciudad' : 'Comuna'} detectada: ${comuna}.`); }
+  else next.push(country === 'CO' ? 'Solicitar ciudad de envio' : 'Solicitar comuna de despacho');
+  if (region) { labels.add(`${country === 'CO' ? 'departamento' : 'region'}_${normalizeLabelPart(region)}`); }
+  if (cart.length) { labels.add('carrito_activo'); reasons.push(`${cart.length} item(s) en carrito.`); next.push('Crear pedido desde el carrito'); }
+  else next.push('Agregar producto recomendado al carrito');
+  if (pedidos.length) { labels.add('cliente_recurrente'); reasons.push('Cliente con historial de pedidos en WooCommerce.'); }
+  else labels.add('cliente_nuevo');
   const totalCart = cart.reduce((sum, item) => sum + Number(item?.variation?.precio || item?.product?.precio || 0) * Number(item?.quantity || 1), 0);
-  if (totalCart >= 50000) labels.add('ticket_alto');
-  if (payload.stockStatus === 'outofstock') labels.add('sin_stock');
+  if (totalCart >= (country === 'CO' ? 180000 : 50000)) labels.add('ticket_alto');
+  const selectedPaymentTitle = payment.title || payment.method_title || payment.method_id || '';
+  if (selectedPaymentTitle) reasons.push(`Metodo de pago seleccionado: ${selectedPaymentTitle}.`);
+  if (shipping?.method_title || shipping?.title) {
+    const isFree = Number(shipping.total || 0) === 0 || /gratis|free/i.test(`${shipping.method_title || shipping.title}`);
+    reasons.push(`Envio seleccionado: ${shipping.method_title || shipping.title}${isFree ? ' (gratis)' : ''}.`);
+    if (isFree) labels.add('envio_gratis');
+  }
+  if (availablePayments.length) reasons.push(`Metodos de pago Woo disponibles: ${availablePayments.map(m=>m.title||m.id).filter(Boolean).slice(0,5).join(', ')}.`);
+  if (availableShipping.length) reasons.push(`Metodos de envio Woo disponibles: ${availableShipping.map(m=>m.title||m.method_title||m.id).filter(Boolean).slice(0,4).join(', ')}.`);
   const messageLines = [];
-  messageLines.push('Hola, revisé la disponibilidad y puedo ayudarle a finalizar su compra.');
-  if (cart.length) messageLines.push(`Tengo seleccionado ${cart.length} producto(s) para cotizar o crear el pedido.`);
-  if (!rut || !validateRut(rut)) messageLines.push('Para emitir correctamente el pedido en Chile, me puede confirmar su RUT.');
-  if (!comuna) messageLines.push('También necesito comuna y dirección completa para validar despacho.');
-  messageLines.push('Cuando confirme los datos, puedo generar el pedido y el link de pago en CLP.');
+  if (country === 'CO') {
+    messageLines.push('Hola, revisé la disponibilidad y puedo ayudarle a finalizar su compra en Colombia.');
+    if (cart.length) messageLines.push(`Tengo seleccionado ${cart.length} producto(s) para crear o copiar la venta a Dropi/WooCommerce.`);
+    if (!documentValue) messageLines.push('Para completar la venta, me confirma su CC/NIT, ciudad, departamento y direccion completa.');
+    messageLines.push('Cuando confirme los datos, puedo dejar el pedido listo con el metodo de pago y envio disponible.');
+  } else {
+    messageLines.push('Hola, revisé la disponibilidad y puedo ayudarle a finalizar su compra.');
+    if (cart.length) messageLines.push(`Tengo seleccionado ${cart.length} producto(s) para crear el pedido.`);
+    if (!documentValue || !validateRut(documentValue)) messageLines.push('Para emitir correctamente el pedido en Chile, me puede confirmar su RUT.');
+    if (!comuna) messageLines.push('También necesito comuna y dirección completa para validar despacho.');
+    messageLines.push('Cuando confirme los datos, puedo generar el pedido y el link de pago en CLP.');
+  }
+  next.push(country === 'CO' ? 'Elegir metodo de pago Woo Colombia disponible' : 'Elegir metodo de pago Woo Chile disponible');
+  next.push('Validar metodo de envio antes de confirmar');
+  const couponSuggestion = totalCart ? {
+    code: `${country === 'CO' ? 'CO' : 'CL'}${Math.round(totalCart).toString().slice(-4)}${Math.floor(10 + Math.random()*89)}`,
+    amount: totalCart >= (country === 'CO' ? 250000 : 80000) ? '10' : '5',
+    discount_type: 'percent',
+    free_shipping: Boolean(shipping && (Number(shipping.total || 0) === 0 || /gratis|free/i.test(`${shipping.method_title || shipping.title || ''}`))),
+    reason: totalCart >= (country === 'CO' ? 250000 : 80000) ? 'Ticket alto: sugerir cupón de cierre.' : 'Cupón moderado para ayudar al cierre.'
+  } : null;
   return {
-    labels: Array.from(labels).filter(Boolean).slice(0, 12),
+    country,
+    store: st.id,
+    prompt_used: countryPrompt(country),
+    labels: Array.from(labels).filter(Boolean).slice(0, 14),
     reasons,
     suggested_message: messageLines.join('\n'),
-    next_actions: [
-      !rut || !validateRut(rut) ? 'Solicitar RUT valido' : 'RUT listo',
-      !comuna ? 'Solicitar comuna de despacho' : 'Comuna lista',
-      cart.length ? 'Crear pedido desde el carrito' : 'Agregar producto recomendado al carrito',
-      'Enviar link de pago Flow si el cliente confirma'
-    ],
+    next_actions: Array.from(new Set(next)).filter(Boolean).slice(0, 8),
+    coupon_suggestion: couponSuggestion,
+    available_payment_methods: availablePayments.map(m => ({ id:m.id, title:m.title })).slice(0,8),
+    available_shipping_methods: availableShipping.map(m => ({ id:m.id || m.method_id, title:m.title || m.method_title, total:m.total })).slice(0,8),
     ai: false
   };
+}
+function extractJsonObject(text = '') {
+  const raw = String(text || '').trim();
+  try { return JSON.parse(raw); } catch (_) {}
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (match) { try { return JSON.parse(match[0]); } catch (_) {} }
+  return null;
+}
+async function callAiRecommendations(provider, payload, baseRecommendations) {
+  const p = String(provider || 'local').toLowerCase();
+  const country = baseRecommendations.country || payload.country || 'CL';
+  const prompt = `${countryPrompt(country)}\n\nDevuelve SOLO JSON valido con estas claves opcionales: labels (array), reasons (array), next_actions (array), suggested_message (string), coupon_suggestion (object con code, amount, discount_type, free_shipping, reason). No uses markdown.`;
+  const data = { country, payload, base_recommendations: baseRecommendations };
+  const timeout = Number(process.env.AI_TIMEOUT_MS || 20000);
+  if (p === 'webhook') {
+    const aiUrl = process.env.AI_RECOMMENDATION_WEBHOOK_URL || '';
+    if (!aiUrl) throw new Error('Webhook IA no configurado');
+    const resp = await axios.post(aiUrl, { ...payload, base_recommendations: baseRecommendations, country_prompt: countryPrompt(country) }, { timeout });
+    return resp.data || {};
+  }
+  if (p === 'openai') {
+    if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY no configurada');
+    const resp = await axios.post('https://api.openai.com/v1/chat/completions', { model: process.env.OPENAI_MODEL || 'gpt-4o-mini', temperature: 0.3, messages: [{ role:'system', content: prompt }, { role:'user', content: JSON.stringify(data).slice(0, 20000) }] }, { timeout, headers: { Authorization:`Bearer ${process.env.OPENAI_API_KEY}` } });
+    return extractJsonObject(resp.data?.choices?.[0]?.message?.content) || {};
+  }
+  if (p === 'deepseek') {
+    if (!process.env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY no configurada');
+    const resp = await axios.post('https://api.deepseek.com/chat/completions', { model: process.env.DEEPSEEK_MODEL || 'deepseek-chat', temperature: 0.3, messages: [{ role:'system', content: prompt }, { role:'user', content: JSON.stringify(data).slice(0, 20000) }] }, { timeout, headers: { Authorization:`Bearer ${process.env.DEEPSEEK_API_KEY}` } });
+    return extractJsonObject(resp.data?.choices?.[0]?.message?.content) || {};
+  }
+  if (p === 'gemini') {
+    if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY no configurada');
+    const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+    const resp = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`, { contents: [{ parts: [{ text: `${prompt}\n\nDatos:\n${JSON.stringify(data).slice(0, 20000)}` }] }] }, { timeout });
+    return extractJsonObject(resp.data?.candidates?.[0]?.content?.parts?.[0]?.text) || {};
+  }
+  return {};
 }
 
 app.get('/flow/retorno', (req, res) => res.sendFile(path.join(__dirname, 'public', 'flow-retorno.html')));
@@ -1382,10 +1461,12 @@ app.get('/chatwoot/conversacion/:id/contexto', async (req, res, next) => {
 app.post('/chatwoot/recomendaciones', async (req, res, next) => {
   try {
     let recommendations = buildRecommendations(req.body || {});
-    const aiUrl = process.env.AI_RECOMMENDATION_WEBHOOK_URL || '';
-    if (aiUrl) {
-      try { const { data } = await axios.post(aiUrl, { ...req.body, base_recommendations: recommendations }, { timeout: Number(process.env.AI_TIMEOUT_MS || 15000) }); recommendations = { ...recommendations, ...(data || {}), ai: true }; }
-      catch (e) { recommendations.ai_error = e.message; }
+    const provider = String(process.env.AI_PROVIDER || 'local').toLowerCase();
+    if (provider && provider !== 'local') {
+      try {
+        const aiData = await callAiRecommendations(provider, req.body || {}, recommendations);
+        recommendations = { ...recommendations, ...(aiData || {}), labels: Array.from(new Set([...(recommendations.labels || []), ...((aiData || {}).labels || [])])), ai: true, ai_provider: provider };
+      } catch (e) { recommendations.ai_error = e.message; }
     }
     res.json({ ok: true, recommendations });
   } catch (error) { next(error); }
@@ -1409,5 +1490,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.2 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.3 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });
