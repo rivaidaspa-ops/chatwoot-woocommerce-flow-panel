@@ -1,7 +1,7 @@
 {
   "name": "chatwoot-woocommerce-flow-panel",
-  "version": "1.1.0",
-  "description": "Panel protegido para Chatwoot integrado con WooCommerce y Flow Chile",
+  "version": "1.2.0",
+  "description": "Panel Chatwoot WooCommerce Flow Chile v6 con Dockerfile, Redis, PostgreSQL y busqueda paginada",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
