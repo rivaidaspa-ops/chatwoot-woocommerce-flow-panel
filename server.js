@@ -1,4 +1,4 @@
-// v7.0: link de pago WooCommerce/Flow, variables limpias y Chatwoot App listo.
+// v7.6: Colombia pagos Wompi/Bold/COD, copia rapida Dropi y venta desde Chatwoot.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -10,6 +10,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const Redis = require('ioredis');
 const { Pool } = require('pg');
+const FormData = require('form-data');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -21,11 +22,66 @@ const PAGE_CACHE_SECONDS = Number(process.env.PAGE_CACHE_SECONDS || 120);
 const PRODUCT_PAGE_SIZE = Number(process.env.PRODUCT_PAGE_SIZE || 20);
 const MAX_PAGE_SIZE = Number(process.env.MAX_PAGE_SIZE || 40);
 
-const requiredEnv = ['PANEL_USER','PANEL_PASSWORD','WC_URL','WC_KEY','WC_SECRET'];
+function parseJsonEnv(name, fallback) { try { return process.env[name] ? JSON.parse(process.env[name]) : fallback; } catch (e) { console.warn(`[WARN] ${name} invalido:`, e.message); return fallback; } }
+
+function defaultPaymentPresets(storeId = 'co') {
+  if (storeId !== 'co') return [];
+  const configured = parseJsonEnv('CO_PAYMENT_METHOD_PRESETS_JSON', null);
+  if (Array.isArray(configured) && configured.length) return configured;
+  return [
+    { id: getCfg('CO_COD_GATEWAY_ID', 'cod'), title: getCfg('CO_COD_GATEWAY_TITLE', 'Contra entrega'), kind: 'cash_on_delivery', requires_link: false, recommended: true },
+    { id: getCfg('CO_WOMPI_GATEWAY_ID', 'wompi'), title: getCfg('CO_WOMPI_GATEWAY_TITLE', 'Wompi'), kind: 'online', requires_link: true, recommended: true },
+    { id: getCfg('CO_BOLD_GATEWAY_ID', 'bold'), title: getCfg('CO_BOLD_GATEWAY_TITLE', 'Bold'), kind: 'online', requires_link: true, recommended: true },
+    { id: getCfg('CO_PSE_GATEWAY_ID', 'pse'), title: getCfg('CO_PSE_GATEWAY_TITLE', 'PSE'), kind: 'online', requires_link: true, recommended: false },
+    { id: getCfg('CO_MERCADO_PAGO_GATEWAY_ID', 'mercadopago'), title: getCfg('CO_MERCADO_PAGO_GATEWAY_TITLE', 'Mercado Pago Colombia'), kind: 'online', requires_link: true, recommended: false },
+    { id: getCfg('CO_EPAYCO_GATEWAY_ID', 'epayco'), title: getCfg('CO_EPAYCO_GATEWAY_TITLE', 'ePayco'), kind: 'online', requires_link: true, recommended: false },
+    { id: getCfg('CO_PAYU_GATEWAY_ID', 'payu'), title: getCfg('CO_PAYU_GATEWAY_TITLE', 'PayU Colombia'), kind: 'online', requires_link: true, recommended: false },
+    { id: getCfg('CO_BANK_TRANSFER_GATEWAY_ID', 'bacs'), title: getCfg('CO_BANK_TRANSFER_GATEWAY_TITLE', 'Transferencia bancaria'), kind: 'manual', requires_link: false, recommended: false }
+  ].filter((m) => m.id && m.title);
+}
+function mergePaymentMethods(wooMethods = [], store) {
+  const st = resolveStore(store.id || store);
+  const map = new Map();
+  for (const g of wooMethods || []) map.set(String(g.id), { ...g, source: 'woocommerce', preset: false });
+  const presets = Array.isArray(st.payment_presets) ? st.payment_presets : defaultPaymentPresets(st.id);
+  for (const p of presets) {
+    const id = String(p.id || '').trim();
+    if (!id) continue;
+    if (map.has(id)) map.set(id, { ...p, ...map.get(id), title: map.get(id).title || p.title, preset: false, source: 'woocommerce' });
+    else map.set(id, { id, title: p.title || id, description: p.description || 'Método sugerido para Colombia. Debe existir/estar activo en WooCommerce para generar links de pago.', enabled: true, preset: true, source: 'preset', kind: p.kind || 'manual', requires_link: Boolean(p.requires_link) });
+  }
+  return Array.from(map.values());
+}
+
+function getCfg(key, fallback = '') { return process.env[key] !== undefined && process.env[key] !== '' ? process.env[key] : fallback; }
+function buildDefaultStoreConfig() {
+  return {
+    cl: { id:'cl', code:'CL', name:getCfg('CL_STORE_NAME','Rivaida Chile'), country:'CL', currency:getCfg('CL_CURRENCY','CLP'), locale:'es-CL', wc_url:String(getCfg('WC_URL','')).replace(/\/$/,''), wc_key:getCfg('WC_KEY',''), wc_secret:getCfg('WC_SECRET',''), document_label:'RUT', document_type:'rut', document_required:getCfg('REQUIRE_RUT','true')!=='false', document_fields:['billing_rut','shipping_rut','_billing_rut','_shipping_rut'], payment_gateway_id:getCfg('WOO_FLOW_GATEWAY_ID','flow'), payment_gateway_title:getCfg('WOO_FLOW_GATEWAY_TITLE','Flow'), postcode_default:getCfg('DEFAULT_POSTCODE','8320000'), state_format:getCfg('CHILE_STATE_FORMAT','name'), chatwoot_labels:['chile','rivaida-cl'] },
+    co: { id:'co', code:'CO', name:getCfg('CO_STORE_NAME','Rivaida Colombia'), country:'CO', currency:getCfg('CO_CURRENCY','COP'), locale:'es-CO', wc_url:String(getCfg('CO_WC_URL','')).replace(/\/$/,''), wc_key:getCfg('CO_WC_KEY',''), wc_secret:getCfg('CO_WC_SECRET',''), document_label:getCfg('CO_DOCUMENT_LABEL','CC / NIT'), document_type:'document', document_required:getCfg('CO_REQUIRE_DOCUMENT','true')!=='false', document_fields:['billing_document','shipping_document','billing_cedula','shipping_cedula'], payment_gateway_id:getCfg('CO_WOO_PAYMENT_GATEWAY_ID',getCfg('CO_COD_GATEWAY_ID','cod')), payment_gateway_title:getCfg('CO_WOO_PAYMENT_GATEWAY_TITLE','Contra entrega Colombia'), postcode_default:getCfg('CO_DEFAULT_POSTCODE','110111'), state_format:'code', chatwoot_labels:['colombia','rivaida-co','dropi'], payment_presets: defaultPaymentPresets('co') }
+  };
+}
+function buildStoreConfig() {
+  const custom=parseJsonEnv('STORE_CONFIG_JSON',{});
+  const merged={...buildDefaultStoreConfig(),...custom};
+  Object.keys(merged).forEach((id)=>{ const st=merged[id]||{}; st.id=String(st.id||id).toLowerCase(); st.code=String(st.code||st.country||id).toUpperCase(); st.country=String(st.country||st.code||id).toUpperCase(); st.currency=st.currency||(st.country==='CO'?'COP':'CLP'); st.wc_url=String(st.wc_url||'').replace(/\/$/,''); merged[id]=st; });
+  return merged;
+}
+let STORE_CONFIG = buildStoreConfig();
+function currentDefaultStore() { return String(getCfg('DEFAULT_STORE','cl')).toLowerCase(); }
+const wcClients = new Map();
+function rebuildRuntimeConfig() { STORE_CONFIG = buildStoreConfig(); wcClients.clear(); allowedOrigins = parseAllowedOrigins(); }
+
+function listStores() { return Object.values(STORE_CONFIG).map((s)=>({ id:s.id, code:s.code, name:s.name, country:s.country, currency:s.currency, document_label:s.document_label, document_type:s.document_type, payment_gateway_id:s.payment_gateway_id, payment_presets:s.payment_presets||[], enabled:Boolean(s.wc_url&&s.wc_key&&s.wc_secret) })); }
+function resolveStore(input='') { const raw=String(input||'').trim().toLowerCase(); return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>String(s.country||s.code).toLowerCase()===raw) || STORE_CONFIG[DEFAULT_STORE] || Object.values(STORE_CONFIG)[0]; }
+function storeFromReq(req) { return resolveStore(req.query.store || req.query.country || req.body?.store_id || req.body?.store || req.body?.country || req.headers['x-store-id'] || currentDefaultStore()); }
+function wcForStore(store) { const st=resolveStore(store?.id||store); if(!st?.wc_url||!st?.wc_key||!st?.wc_secret){ const e=new Error(`WooCommerce no configurado para tienda ${st?.id||store}`); e.status=400; throw e; } if(!wcClients.has(st.id)){ wcClients.set(st.id, axios.create({ baseURL:`${st.wc_url}/wp-json/wc/v3`, auth:{ username:st.wc_key, password:st.wc_secret }, timeout:Number(process.env.WC_TIMEOUT_MS||30000) })); } return wcClients.get(st.id); }
+
+const requiredEnv = ['PANEL_USER','PANEL_PASSWORD'];
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
 if (missingEnv.length) console.warn(`[WARN] Variables faltantes: ${missingEnv.join(', ')}`);
 
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((x) => x.trim()).filter(Boolean);
+function parseAllowedOrigins() { return (getCfg('ALLOWED_ORIGINS','') || '').split(',').map((x) => x.trim()).filter(Boolean); }
+let allowedOrigins = parseAllowedOrigins();
 app.set('trust proxy', 1);
 app.use(helmet({ contentSecurityPolicy: false, frameguard: false }));
 app.use(express.json({ limit: '5mb' }));
@@ -103,7 +159,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v7.3-chatwoot-auto-context-image', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v7.6-colombia-pagos-dropi', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -130,16 +186,14 @@ function authMiddleware(req, res, next) {
   return res.status(401).json({ error: 'Credenciales requeridas' });
 }
 
-const wc = axios.create({
-  baseURL: `${WC_URL}/wp-json/wc/v3`,
-  auth: { username: process.env.WC_KEY, password: process.env.WC_SECRET },
-  timeout: Number(process.env.WC_TIMEOUT_MS || 30000)
-});
 function chatwootClient() {
-  if (!CHATWOOT_URL || !process.env.CHATWOOT_API_KEY || !process.env.CHATWOOT_ACCOUNT_ID) return null;
+  const chatwootUrl = String(getCfg('CHATWOOT_URL','')).replace(/\/$/,'');
+  const apiKey = getCfg('CHATWOOT_API_KEY','');
+  const accountId = getCfg('CHATWOOT_ACCOUNT_ID','');
+  if (!chatwootUrl || !apiKey || !accountId) return null;
   return axios.create({
-    baseURL: `${CHATWOOT_URL}/api/v1/accounts/${process.env.CHATWOOT_ACCOUNT_ID}`,
-    headers: { api_access_token: process.env.CHATWOOT_API_KEY, 'Content-Type': 'application/json' },
+    baseURL: `${chatwootUrl}/api/v1/accounts/${accountId}`,
+    headers: { api_access_token: apiKey, 'Content-Type': 'application/json' },
     timeout: 20000
   });
 }
@@ -148,18 +202,18 @@ function formatWooError(error) {
   return data?.message || data?.error || error.message || 'Error inesperado';
 }
 
-function getOrderPayUrl(order = {}) {
+function getOrderPayUrl(order = {}, store = null) {
   const direct = order.payment_url || order.checkout_payment_url || order.pay_url || '';
   if (direct) return direct;
+  const st = store ? resolveStore(store.id || store) : resolveStore(DEFAULT_STORE);
   const key = order.order_key || order.orderKey || '';
-  if (WC_URL && order.id && key) {
-    return `${WC_URL}/checkout/order-pay/${order.id}/?pay_for_order=true&key=${encodeURIComponent(key)}`;
-  }
+  if (st?.wc_url && order.id && key) return `${st.wc_url}/checkout/order-pay/${order.id}/?pay_for_order=true&key=${encodeURIComponent(key)}`;
   return '';
 }
 
-function preferredWooPaymentGateway(body = {}) {
-  return body.gateway_id || body.payment_method || process.env.WOO_FLOW_GATEWAY_ID || process.env.WOO_PAYMENT_GATEWAY_ID || 'flow';
+function preferredWooPaymentGateway(body = {}, store = null) {
+  const st = store ? resolveStore(store.id || store) : resolveStore(DEFAULT_STORE);
+  return body.gateway_id || body.payment_method || st.payment_gateway_id || process.env.WOO_FLOW_GATEWAY_ID || process.env.WOO_PAYMENT_GATEWAY_ID || 'flow';
 }
 
 function loadRegiones() {
@@ -250,6 +304,56 @@ function regionStateValue(info) {
   return normalizeRegionForAli(info.region || info.codigo || '');
 }
 
+
+const CONFIG_KEYS = [
+  'PUBLIC_BASE_URL','ALLOWED_ORIGINS','PANEL_APP_TOKEN','DEFAULT_STORE',
+  'WC_URL','WC_KEY','WC_SECRET','WOO_FLOW_GATEWAY_ID','WOO_FLOW_GATEWAY_TITLE',
+  'CO_WC_URL','CO_WC_KEY','CO_WC_SECRET','CO_STORE_NAME','CO_WOO_PAYMENT_GATEWAY_ID','CO_WOO_PAYMENT_GATEWAY_TITLE',
+  'CO_COD_GATEWAY_ID','CO_COD_GATEWAY_TITLE','CO_WOMPI_GATEWAY_ID','CO_WOMPI_GATEWAY_TITLE','CO_BOLD_GATEWAY_ID','CO_BOLD_GATEWAY_TITLE','CO_PSE_GATEWAY_ID','CO_PSE_GATEWAY_TITLE','CO_MERCADO_PAGO_GATEWAY_ID','CO_MERCADO_PAGO_GATEWAY_TITLE','CO_EPAYCO_GATEWAY_ID','CO_EPAYCO_GATEWAY_TITLE','CO_PAYU_GATEWAY_ID','CO_PAYU_GATEWAY_TITLE','CO_BANK_TRANSFER_GATEWAY_ID','CO_BANK_TRANSFER_GATEWAY_TITLE','CO_PAYMENT_METHOD_PRESETS_JSON',
+  'CHATWOOT_URL','CHATWOOT_API_KEY','CHATWOOT_ACCOUNT_ID',
+  'PAYMENT_LINK_PROVIDER','FLOW_API_URL','FLOW_API_KEY','FLOW_SECRET_KEY','FLOW_URL_CONFIRMATION','FLOW_URL_RETURN','AI_RECOMMENDATION_WEBHOOK_URL',
+  'CACHE_TTL_SECONDS','PRODUCT_PAGE_SIZE','MAX_PAGE_SIZE','SYNC_PER_PAGE','VARIATION_CACHE_SECONDS','CHATWOOT_SEND_IMAGE_ATTACHMENT'
+];
+async function loadAppSettingsFromDb() {
+  if (!pgPool) return;
+  try {
+    const { rows } = await pgPool.query('SELECT key,value FROM app_settings');
+    for (const row of rows) process.env[row.key] = row.value;
+    rebuildRuntimeConfig();
+  } catch (e) { console.warn('[Settings load]', e.message); }
+}
+async function saveAppSettingsToDb(settings = {}) {
+  if (!pgPool || !dbReady) return false;
+  const entries = Object.entries(settings).filter(([key]) => CONFIG_KEYS.includes(key));
+  const client = await pgPool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const [key, value] of entries) {
+      await client.query('INSERT INTO app_settings(key,value,updated_at) VALUES($1,$2,now()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()', [key, String(value ?? '')]);
+    }
+    await client.query('COMMIT');
+    return true;
+  } catch (e) { await client.query('ROLLBACK'); throw e; }
+  finally { client.release(); }
+}
+function readRuntimeSettings() {
+  const out = {};
+  for (const key of CONFIG_KEYS) out[key] = process.env[key] || '';
+  return out;
+}
+async function testWooStore(storeId) {
+  const st = resolveStore(storeId);
+  const wc = wcForStore(st);
+  const { data } = await wc.get('/system_status');
+  return { ok:true, store: st.id, name: st.name, url: st.wc_url, currency: st.currency, environment: data?.environment?.home_url || st.wc_url };
+}
+async function testChatwootConnection() {
+  const client = chatwootClient();
+  if (!client) { const e = new Error('Faltan credenciales Chatwoot'); e.status=400; throw e; }
+  const { data } = await client.get('/inboxes');
+  return { ok:true, inboxes: Array.isArray(data?.payload) ? data.payload.length : (Array.isArray(data) ? data.length : 0) };
+}
+
 async function initDb() {
   if (!pgPool) return false;
   try {
@@ -265,7 +369,8 @@ async function initDb() {
     await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_categories ON product_index USING gin(categorias)`);
     await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_sale ON product_index (precio_oferta)`);
     dbReady = true;
-    console.log('[Postgres] indice de productos listo');
+    await loadAppSettingsFromDb();
+    console.log('[Postgres] indice de productos y configuracion listo');
     return true;
   } catch (e) { console.warn('[Postgres] no disponible:', e.message); return false; }
 }
@@ -288,7 +393,8 @@ function isNoisyAttributeName(name='') {
   const noisy = ['size_info','sizelist','shipping','logistics','product chemical','producto quimico','origen','cn','fujian','lugar aplicable','numero de modelo','model','department','departamento'];
   return noisy.some(x => n.includes(x));
 }
-function normalizeProduct(product, variations = null) {
+function normalizeProduct(product, variations = null, store = null) {
+  const st = store ? resolveStore(store.id || store) : resolveStore(DEFAULT_STORE);
   const attrs = (product.attributes || []).filter(a => a && a.name && !isNoisyAttributeName(a.name)).map((a) => ({ id: a.id, name: a.name, options: Array.isArray(a.options) ? a.options.slice(0, 30) : [], variation: a.variation }));
   return {
     id: product.id,
@@ -299,7 +405,10 @@ function normalizeProduct(product, variations = null) {
     precio: product.price || product.regular_price || '0',
     precio_regular: product.regular_price || '',
     precio_oferta: product.sale_price || '',
-    moneda: 'CLP',
+    en_oferta: Boolean(product.on_sale || Number(product.sale_price || 0) > 0),
+    moneda: st.currency || 'CLP',
+    store_id: st.id,
+    country: st.country,
     stock: product.stock_quantity,
     stock_status: product.stock_status,
     manage_stock: product.manage_stock,
@@ -321,6 +430,7 @@ function normalizeVariation(v) {
     precio: v.price || v.regular_price || '0',
     precio_regular: v.regular_price || '',
     precio_oferta: v.sale_price || '',
+    en_oferta: Boolean(v.on_sale || Number(v.sale_price || 0) > 0),
     stock: v.stock_quantity,
     stock_status: v.stock_status,
     manage_stock: v.manage_stock,
@@ -354,15 +464,17 @@ async function searchProductsIndex({ q='', category='', sale=false, stock='', li
   const clauses=[]; const values=[];
   if (q) { values.push(`%${normalizeText(q)}%`); clauses.push(`search_text ILIKE $${values.length}`); }
   if (category) { values.push(category); clauses.push(`$${values.length} = ANY(categorias)`); }
-  if (sale) clauses.push(`COALESCE(precio_oferta,0) > 0`);
+  if (sale) clauses.push(`(COALESCE(precio_oferta,0) > 0 OR payload->>'en_oferta' = 'true')`);
   if (stock === 'instock') clauses.push(`stock_status = 'instock'`);
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   values.push(Number(limit)); const limitIdx=values.length; values.push(Number(offset)); const offsetIdx=values.length;
   const { rows } = await pgPool.query(`SELECT payload, count(*) OVER() AS total FROM product_index ${where} ORDER BY updated_at DESC, nombre ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values);
   return { productos: rows.map(r => r.payload), total: Number(rows[0]?.total || 0), source: 'postgres' };
 }
-async function getVariations(productId, force=false) {
-  const key = `variations:${productId}`;
+async function getVariations(productId, store = resolveStore(DEFAULT_STORE), force=false) {
+  const st = resolveStore(store.id || store);
+  const wc = wcForStore(st);
+  const key = `variations:${st.id}:${productId}`;
   return (await remember(key, Number(process.env.VARIATION_CACHE_SECONDS || 3600), async () => {
     const variations = [];
     let page = 1;
@@ -375,21 +487,23 @@ async function getVariations(productId, force=false) {
     return variations;
   }, force)).value;
 }
-async function buildProductsPage({ q='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {}) {
+async function buildProductsPage({ q='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {}, store = resolveStore(DEFAULT_STORE)) {
+  const st = resolveStore(store.id || store);
+  const wc = wcForStore(st);
   const page = Math.floor(Number(offset || 0) / Number(limit || PRODUCT_PAGE_SIZE)) + 1;
   const params = { per_page: Math.min(Number(limit || PRODUCT_PAGE_SIZE), 100), page, status: 'publish' };
   if (q) params.search = q;
   const response = await wc.get('/products', { params });
   const total = Number(response.headers['x-wp-total'] || 0);
-  const normalized = response.data.map((p) => normalizeProduct(p));
-  upsertProductsIndex(normalized).catch((e) => console.warn('[index async]', e.message));
+  const normalized = response.data.map((p) => normalizeProduct(p, null, st));
+  if (st.id === DEFAULT_STORE) upsertProductsIndex(normalized).catch((e) => console.warn('[index async]', e.message));
   return { productos: normalized, total: total || (Number(offset) + normalized.length + (normalized.length === Number(limit) ? 1 : 0)), source: 'woocommerce_page' };
 }
 function filterProductsLocal(products, { q='', category='', sale=false, stock='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {}) {
   const nq = normalizeText(q);
   let filtered = products.filter(p => {
     if (category && !(p.categorias || []).includes(category)) return false;
-    if (sale && !Number(p.precio_oferta || 0)) return false;
+    if (sale && !p.en_oferta && !Number(p.precio_oferta || 0)) return false;
     if (stock === 'instock' && p.stock_status !== 'instock') return false;
     if (!nq) return true;
     return productSearchText(p).includes(nq);
@@ -397,7 +511,9 @@ function filterProductsLocal(products, { q='', category='', sale=false, stock=''
   const total = filtered.length;
   return { productos: filtered.slice(Number(offset), Number(offset)+Number(limit)), total, source: 'memory' };
 }
-async function runCatalogSync() {
+async function runCatalogSync(store = resolveStore(DEFAULT_STORE)) {
+  const st = resolveStore(store.id || store);
+  const wc = wcForStore(st);
   if (syncJob.running) return;
   syncJob = { running: true, startedAt: new Date().toISOString(), finishedAt: null, page: 0, total: 0, indexed: 0, error: null };
   try {
@@ -407,7 +523,8 @@ async function runCatalogSync() {
     while (true) {
       syncJob.page = page;
       const response = await wc.get('/products', { params: { per_page: perPage, page, status: 'publish' } });
-      const products = response.data.map((p) => normalizeProduct(p));
+      const products = response.data.map((p) => normalizeProduct(p, null, st));
+      syncJob.store = st.id;
       syncJob.total = Number(response.headers['x-wp-total'] || syncJob.total || 0);
       await upsertProductsIndex(products);
       syncJob.indexed += products.length;
@@ -444,44 +561,35 @@ function flowSign(params) {
   return crypto.createHmac('sha256', process.env.FLOW_SECRET_KEY || '').update(toSign).digest('hex');
 }
 function buildFlowPayload(params) { const p = { ...params }; p.s = flowSign(p); return new URLSearchParams(p).toString(); }
-function normalizeCheckout(body) {
-  const rut = String(body.rut || body.billing?.rut || getMetaValue(body.meta_data, RUT_META_KEYS) || '').trim();
-  if (process.env.REQUIRE_RUT !== 'false' && !validateRut(rut)) { const e = new Error('RUT chileno invalido o faltante'); e.status = 400; throw e; }
-  const rutFormatted = formatRut(rut);
+function normalizeDocument(value = '') { return String(value || '').replace(/[.\-\s]/g, '').trim().toUpperCase(); }
+function buildDocumentMeta(documentValue, store) {
+  const st = resolveStore(store.id || store);
+  if (!documentValue) return [];
+  const formatted = st.document_type === 'rut' ? formatRut(documentValue) : String(documentValue).trim();
+  const fields = Array.isArray(st.document_fields) && st.document_fields.length ? st.document_fields : (st.country === 'CL' ? ['billing_rut','shipping_rut'] : ['billing_document','shipping_document']);
+  return fields.map((key) => ({ key, value: formatted }));
+}
+function normalizeCheckout(body, store = resolveStore(DEFAULT_STORE)) {
+  const st = resolveStore(store.id || store);
+  const documentValue = String(body.document || body.rut || body.billing?.rut || body.billing?.document || getMetaValue(body.meta_data, RUT_META_KEYS) || '').trim();
+  if (st.document_required !== false && st.document_type === 'rut' && !validateRut(documentValue)) { const e = new Error('RUT chileno invalido o faltante'); e.status = 400; throw e; }
+  if (st.document_required !== false && st.document_type !== 'rut' && !normalizeDocument(documentValue)) { const e = new Error(`${st.document_label || 'Documento'} faltante`); e.status = 400; throw e; }
   const billing = { ...(body.billing || {}) };
   const shipping = { ...(body.shipping || billing) };
-  const comuna = body.comuna || billing.city || shipping.city;
-  const postcode = body.postcode || getPostcode(comuna, process.env.DEFAULT_POSTCODE || '8320000');
-  const regionInfo = resolveRegionInfo(body.region_nombre || body.region || body.region_codigo || billing.state || shipping.state, comuna);
-  const stateValue = regionStateValue(regionInfo);
-  billing.country = 'CL'; shipping.country = 'CL';
+  const ciudad = body.comuna || body.city || billing.city || shipping.city;
+  const postcode = body.postcode || getCountryPostcode(st.country, ciudad, st.postcode_default);
+  const regionInfo = resolveRegionInfoCountry(body.region_nombre || body.region || body.region_codigo || billing.state || shipping.state, ciudad, st.country);
+  const stateValue = regionStateValue(regionInfo, st);
+  billing.country = st.country; shipping.country = st.country;
   billing.state = stateValue; shipping.state = stateValue;
   billing.postcode = postcode; shipping.postcode = postcode;
-  billing.city = comuna || billing.city; shipping.city = comuna || shipping.city;
-
-  const safeIncomingMeta = (body.meta_data || []).filter((m) => {
-    const k = normalizeText(m?.key || '');
-    return ['_chatwoot_conversation_id','chatwoot_conversation_id'].includes(k);
-  });
-  const metaData = mergeMetaData([
-    ...safeIncomingMeta,
-    ...buildRutMeta(rutFormatted)
-  ]);
-
-  return {
-    payment_method: body.payment_method || process.env.WOO_FLOW_GATEWAY_ID || 'flow',
-    payment_method_title: body.payment_method_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Flow - Webpay / Multicaja',
-    set_paid: false,
-    status: body.status || 'pending',
-    billing,
-    shipping,
-    line_items: (body.line_items || []).map((i) => ({ product_id: Number(i.product_id), variation_id: i.variation_id ? Number(i.variation_id) : undefined, quantity: Number(i.quantity) })),
-    shipping_lines: body.shipping_lines || [],
-    customer_note: body.customer_note || '',
-    meta_data: metaData
-  };
+  billing.city = ciudad || billing.city; shipping.city = ciudad || shipping.city;
+  const safeIncomingMeta = (body.meta_data || []).filter((m)=>['_chatwoot_conversation_id','chatwoot_conversation_id','rivaida_store','rivaida_country'].includes(normalizeText(m?.key||'')));
+  const metaData = mergeMetaData([...safeIncomingMeta,{key:'rivaida_store',value:st.id},{key:'rivaida_country',value:st.country},...buildDocumentMeta(documentValue, st)]);
+  return { payment_method: body.payment_method || st.payment_gateway_id || process.env.WOO_FLOW_GATEWAY_ID || 'flow', payment_method_title: body.payment_method_title || st.payment_gateway_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Pago WooCommerce', set_paid:false, status:body.status||'pending', billing, shipping, line_items:(body.line_items||[]).map((i)=>({ product_id:Number(i.product_id), variation_id:i.variation_id?Number(i.variation_id):undefined, quantity:Number(i.quantity) })), shipping_lines:body.shipping_lines||[], customer_note:body.customer_note||'', meta_data:metaData };
 }
-async function validateStock(lineItems = []) {
+async function validateStock(lineItems = [], store = resolveStore(DEFAULT_STORE)) {
+  const wc = wcForStore(store);
   if (!Array.isArray(lineItems) || !lineItems.length) { const e = new Error('Debe incluir al menos un producto'); e.status = 400; throw e; }
   for (const item of lineItems) {
     const productId = Number(item.product_id);
@@ -544,10 +652,35 @@ app.get('/flow/retorno', (req, res) => res.sendFile(path.join(__dirname, 'public
 app.post('/flow/confirmacion', (req, res) => res.status(200).send('OK'));
 
 app.use(authMiddleware);
+
+app.get('/admin/settings', async (req, res) => {
+  res.json({ ok:true, settings: readRuntimeSettings(), stores: listStores(), postgres: dbReady, redis: redisReady });
+});
+app.post('/admin/settings', async (req, res, next) => {
+  try {
+    const settings = req.body?.settings || req.body || {};
+    for (const [key, value] of Object.entries(settings)) if (CONFIG_KEYS.includes(key)) process.env[key] = String(value ?? '');
+    rebuildRuntimeConfig();
+    await saveAppSettingsToDb(settings);
+    await cacheDelPrefix('productos:'); await cacheDelPrefix('cliente:'); await cacheDelPrefix('payment_methods:');
+    res.json({ ok:true, message:'Configuracion guardada', stores:listStores(), saved_keys:Object.keys(settings).filter(k=>CONFIG_KEYS.includes(k)) });
+  } catch (error) { next(error); }
+});
+app.post('/admin/settings/test', async (req, res, next) => {
+  try {
+    const target = req.body?.target || 'chatwoot';
+    if (target === 'chatwoot') return res.json(await testChatwootConnection());
+    if (target === 'woo') return res.json(await testWooStore(req.body?.store || 'cl'));
+    return res.status(400).json({ error:'target no soportado' });
+  } catch (error) { next(error); }
+});
+
 app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
 
-app.get('/regiones', (req, res) => res.json({ regiones }));
-app.get('/comunas', (req, res) => res.json({ comunas }));
+app.get('/stores', (req,res)=>res.json({ stores:listStores(), default_store:currentDefaultStore() }));
+app.get('/paises', (req,res)=>res.json({ stores:listStores(), default_store:currentDefaultStore() }));
+app.get('/regiones', (req, res) => { const st=storeFromReq(req); res.json({ store:st.id, country:st.country, regiones:getCountryRegions(st.country) }); });
+app.get('/comunas', (req, res) => { const st=storeFromReq(req); const regs=getCountryRegions(st.country); const region=String(req.query.region||'').toUpperCase(); const selected=regs.find(r=>String(r.codigo).toUpperCase()===region||normalizeText(r.region)===normalizeText(req.query.region||'')); const comunasOut=selected?selected.comunas:regs.flatMap(r=>r.comunas||[]); res.json({ store:st.id, country:st.country, comunas:comunasOut }); });
 app.get('/validar-rut', (req, res) => res.json({ rut: formatRut(req.query.rut || ''), valido: validateRut(req.query.rut || '') }));
 app.get('/cache/status', async (req, res) => res.json({ ok: true, memory_items: memoryCache.size, redis: redisReady, postgres: dbReady, sync: syncJob }));
 app.post('/cache/clear', async (req, res) => { memoryCache.clear(); await cacheDelPrefix('productos:'); await cacheDelPrefix('cliente:'); await cacheDelPrefix('variations:'); res.json({ ok: true, message: 'Cache limpiado' }); });
@@ -557,7 +690,9 @@ app.get('/cliente', async (req, res, next) => {
     const email = String(req.query.email || req.query.email_cliente || req.query.customer_email || '').trim().toLowerCase();
     if (!email) return res.status(400).json({ error: 'Debe indicar email del cliente' });
     const force = req.query.refresh === 'true';
-    const result = await remember(`cliente:${email}`, 60, async () => {
+    const st = storeFromReq(req);
+    const wc = wcForStore(st);
+    const result = await remember(`cliente:${st.id}:${email}`, 60, async () => {
       const { data: customers } = await wc.get('/customers', { params: { email, per_page: 1 } });
       const customer = customers[0] || null;
       const { data: orders } = await wc.get('/orders', { params: { search: email, per_page: 30, orderby: 'date', order: 'desc' } });
@@ -571,7 +706,9 @@ app.get('/cliente', async (req, res, next) => {
           numero: order.number,
           estado: order.status,
           total: order.total,
-          moneda: order.currency || 'CLP',
+          moneda: order.currency || st.currency || 'CLP',
+          store_id: st.id,
+          country: st.country,
           fecha: order.date_created,
           metodo_pago: order.payment_method_title,
           payment_method: order.payment_method,
@@ -594,36 +731,39 @@ app.get('/productos', async (req, res, next) => {
 app.get('/productos/search', async (req, res, next) => {
   try {
     const params = { q: String(req.query.q || '').trim(), category: String(req.query.category || '').trim(), sale: req.query.sale === 'true', stock: String(req.query.stock || ''), limit: Math.min(Number(req.query.limit || PRODUCT_PAGE_SIZE), MAX_PAGE_SIZE), offset: Number(req.query.offset || 0) };
-    const cacheKey = `productos:search:${hashKey(JSON.stringify(params))}`;
+    const st = storeFromReq(req);
+    const cacheKey = `productos:${st.id}:search:${hashKey(JSON.stringify(params))}`;
     const force = req.query.refresh === 'true';
     const result = await remember(cacheKey, PAGE_CACHE_SECONDS, async () => {
-      let found = await searchProductsIndex(params);
+      let found = st.id === DEFAULT_STORE ? await searchProductsIndex(params) : null;
       if (!found) {
-        found = await buildProductsPage(params);
+        found = await buildProductsPage(params, st);
         if (params.category || params.sale || params.stock === 'instock') found = filterProductsLocal(found.productos, { ...params, offset: 0 });
       }
       return found;
     }, force);
-    res.json({ ...result.value, cached: result.cached, limit: params.limit, offset: params.offset, redis: redisReady, postgres: dbReady, index_count: await productIndexCount(), sync: syncJob });
+    res.json({ ...result.value, store:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count: st.id === DEFAULT_STORE ? await productIndexCount() : 0, sync:syncJob });
   } catch (error) { next(error); }
 });
 app.get('/productos/:id/variaciones', async (req, res, next) => {
   try {
     const force = req.query.refresh === 'true';
-    const variations = await getVariations(req.params.id, force);
+    const st = storeFromReq(req);
+    const variations = await getVariations(req.params.id, st, force);
     res.json({ product_id: Number(req.params.id), variations, total: variations.length, cached: !force });
   } catch (error) { next(error); }
 });
 app.post('/productos/sync', async (req, res) => {
   if (syncJob.running) return res.json({ ok: true, started: false, message: 'Sincronizacion ya en ejecucion', sync: syncJob });
-  runCatalogSync();
+  runCatalogSync(storeFromReq(req));
   res.json({ ok: true, started: true, message: 'Sincronizacion iniciada en segundo plano', sync: syncJob });
 });
 app.get('/productos/sync/status', (req, res) => res.json({ ok: true, sync: syncJob }));
 app.get('/categorias', async (req, res, next) => {
   try {
-    const result = await remember('categorias:wc', 3600, async () => {
-      const { data } = await wc.get('/products/categories', { params: { per_page: 100, hide_empty: false } });
+    const st=storeFromReq(req);
+    const result = await remember(`categorias:${st.id}:wc`, 3600, async () => {
+      const { data } = await wcForStore(st).get('/products/categories', { params: { per_page: 100, hide_empty: false } });
       return data.map(c => ({ id: c.id, name: c.name, slug: c.slug, count: c.count })).filter(c => c.name).sort((a,b)=>a.name.localeCompare(b.name,'es'));
     }, req.query.refresh === 'true');
     res.json({ categorias: result.value, cached: result.cached });
@@ -632,11 +772,13 @@ app.get('/categorias', async (req, res, next) => {
 
 app.get('/payment-methods', async (req, res, next) => {
   try {
-    const result = await remember('payment_gateways:wc', 3600, async () => {
-      const { data } = await wc.get('/payment_gateways');
-      return (data || []).filter((g) => g.enabled).map((g) => ({ id: g.id, title: g.title || g.method_title || g.id, description: cleanHtml(g.description || ''), enabled: g.enabled }));
+    const st=storeFromReq(req);
+    const result = await remember(`payment_gateways:${st.id}:wc`, 3600, async () => {
+      const { data } = await wcForStore(st).get('/payment_gateways');
+      const wooMethods = (data || []).filter((g) => g.enabled).map((g) => ({ id: g.id, title: g.title || g.method_title || g.id, description: cleanHtml(g.description || ''), enabled: g.enabled, source: 'woocommerce' }));
+      return mergePaymentMethods(wooMethods, st);
     }, req.query.refresh === 'true');
-    res.json({ methods: result.value, cached: result.cached });
+    res.json({ store:st.id, country:st.country, methods:result.value, cached:result.cached, note: st.country === 'CO' ? 'Incluye metodos activos de WooCommerce mas sugeridos Colombia (Wompi, Bold, contra entrega, PSE, PayU, ePayco, Mercado Pago).' : '' });
   } catch (error) { next(error); }
 });
 
@@ -647,14 +789,16 @@ app.get('/pedidos/buscar', async (req, res, next) => {
     const params = { per_page: Math.min(Number(req.query.limit || 20), 50), orderby: 'date', order: 'desc' };
     if (q) params.search = q;
     if (email && !q) params.search = email;
-    const { data } = await wc.get('/orders', { params });
+    const st=storeFromReq(req);
+    const { data } = await wcForStore(st).get('/orders', { params });
     res.json({ pedidos: data.map((order) => ({ id: order.id, numero: order.number, estado: order.status, total: order.total, fecha: order.date_created, metodo_pago: order.payment_method_title, email: order.billing?.email || '', nombre: `${order.billing?.first_name || ''} ${order.billing?.last_name || ''}`.trim(), productos: order.line_items?.map((i) => ({ nombre: i.name, cantidad: i.quantity, total: i.total, sku: i.sku })) || [] })) });
   } catch (error) { next(error); }
 });
 
 app.get('/pedidos/:id', async (req, res, next) => {
   try {
-    const { data: order } = await wc.get(`/orders/${Number(req.params.id)}`);
+    const st=storeFromReq(req);
+    const { data: order } = await wcForStore(st).get(`/orders/${Number(req.params.id)}`);
     res.json({ pedido: order });
   } catch (error) { next(error); }
 });
@@ -662,31 +806,37 @@ app.get('/pedidos/:id', async (req, res, next) => {
 app.post('/pedidos/:id/link-pago-woo', async (req, res, next) => {
   try {
     const orderId = Number(req.params.id);
-    const gatewayId = preferredWooPaymentGateway(req.body || {});
+    const st=storeFromReq(req);
+    const gatewayId = preferredWooPaymentGateway(req.body || {}, st);
     const gatewayTitle = req.body?.payment_method_title || req.body?.gateway_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Flow - Webpay / Multicaja';
 
     let order;
     if (gatewayId) {
       const updatePayload = { payment_method: gatewayId, payment_method_title: gatewayTitle, status: req.body?.status || 'pending' };
-      const updated = await wc.put(`/orders/${orderId}`, updatePayload);
+      const updated = await wcForStore(st).put(`/orders/${orderId}`, updatePayload);
       order = updated.data;
     } else {
-      const current = await wc.get(`/orders/${orderId}`);
+      const current = await wcForStore(st).get(`/orders/${orderId}`);
       order = current.data;
     }
 
-    const url = getOrderPayUrl(order);
+    const url = getOrderPayUrl(order, st);
     if (!url) return res.status(502).json({ error: 'WooCommerce no retorno link de pago. Verifique que el pedido tenga order_key y que Checkout esté activo.' });
-    res.json({ ok: true, provider: 'woocommerce', gateway_id: gatewayId, url, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
+    res.json({ ok: true, provider: 'woocommerce', gateway_id: gatewayId, url, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || st.currency || 'CLP',
+          store_id: st.id,
+          country: st.country, payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
   } catch (error) { next(error); }
 });
 
 app.get('/pedidos/:id/link-pago-woo', async (req, res, next) => {
   try {
-    const { data: order } = await wc.get(`/orders/${Number(req.params.id)}`);
-    const url = getOrderPayUrl(order);
+    const st=storeFromReq(req);
+    const { data: order } = await wcForStore(st).get(`/orders/${Number(req.params.id)}`);
+    const url = getOrderPayUrl(order, st);
     if (!url) return res.status(502).json({ error: 'WooCommerce no retorno link de pago.' });
-    res.json({ ok: true, provider: 'woocommerce', url, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
+    res.json({ ok: true, provider: 'woocommerce', url, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || st.currency || 'CLP',
+          store_id: st.id,
+          country: st.country, payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
   } catch (error) { next(error); }
 });
 
@@ -699,11 +849,12 @@ app.patch('/pedidos/:id', async (req, res, next) => {
     if (body.billing) allowed.billing = body.billing;
     if (body.shipping) allowed.shipping = body.shipping;
     if (Array.isArray(body.line_items)) {
-      await validateStock(body.line_items);
+      await validateStock(body.line_items, storeFromReq(req));
       allowed.line_items = body.line_items.map((i) => ({ product_id: Number(i.product_id), variation_id: i.variation_id ? Number(i.variation_id) : undefined, quantity: Number(i.quantity) }));
     }
     if (body.rut && validateRut(body.rut)) allowed.meta_data = buildRutMeta(formatRut(body.rut));
-    const { data: order } = await wc.put(`/orders/${Number(req.params.id)}`, allowed);
+    const st=storeFromReq(req);
+    const { data: order } = await wcForStore(st).put(`/orders/${Number(req.params.id)}`, allowed);
     await cacheDelPrefix('cliente:');
     res.json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP' } });
   } catch (error) { next(error); }
@@ -711,7 +862,8 @@ app.patch('/pedidos/:id', async (req, res, next) => {
 
 app.post('/pedidos/:id/cancelar', async (req, res, next) => {
   try {
-    const { data: order } = await wc.put(`/orders/${Number(req.params.id)}`, { status: 'cancelled', customer_note: req.body?.customer_note || undefined });
+    const st=storeFromReq(req);
+    const { data: order } = await wcForStore(st).put(`/orders/${Number(req.params.id)}`, { status: 'cancelled', customer_note: req.body?.customer_note || undefined });
     await cacheDelPrefix('cliente:');
     res.json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP' } });
   } catch (error) { next(error); }
@@ -720,18 +872,115 @@ app.post('/pedidos/:id/cancelar', async (req, res, next) => {
 app.delete('/pedidos/:id', async (req, res, next) => {
   try {
     const force = req.query.force === 'true';
-    const { data: order } = await wc.delete(`/orders/${Number(req.params.id)}`, { params: { force } });
+    const st=storeFromReq(req);
+    const { data: order } = await wcForStore(st).delete(`/orders/${Number(req.params.id)}`, { params: { force } });
     await cacheDelPrefix('cliente:');
     res.json({ ok: true, deleted: true, force, pedido: { id: order.id, numero: order.number || order.id, estado: order.status || 'trash' } });
   } catch (error) { next(error); }
 });
 
+
+function buildPlatformSalePayload(body = {}, store = resolveStore(DEFAULT_STORE)) {
+  const st = resolveStore(store.id || store);
+  const checkout = normalizeCheckout(body, st);
+  const fullName = `${checkout.billing.first_name || ''} ${checkout.billing.last_name || ''}`.trim();
+  const documentValue = String(body.document || body.rut || body.billing?.document || body.billing?.rut || '').trim();
+  const paymentTitle = body.payment_method_title || body.gateway_title || st.payment_gateway_title || checkout.payment_method_title;
+  const products = (body.cart || []).map((item) => ({
+    product_id: item.product?.id || item.product_id,
+    variation_id: item.variation?.id || item.variation_id || null,
+    name: item.product?.nombre || item.name || '',
+    sku: item.variation?.sku || item.product?.sku || item.sku || '',
+    quantity: Number(item.quantity || 1),
+    price: Number(item.variation?.precio || item.product?.precio || item.price || 0),
+    variation: Array.isArray(item.variation?.atributos) ? item.variation.atributos.map((a) => `${a.name}: ${a.option}`).join(' / ') : '',
+    image: item.variation?.imagen || item.product?.imagen || item.image || '',
+    permalink: item.product?.permalink || item.permalink || ''
+  }));
+  const total = products.reduce((sum, p) => sum + Number(p.price || 0) * Number(p.quantity || 1), 0);
+  return {
+    platform: st.country === 'CO' ? 'dropi_colombia' : 'woocommerce',
+    store_id: st.id,
+    country: st.country,
+    currency: st.currency,
+    customer: {
+      full_name: fullName,
+      first_name: checkout.billing.first_name || '',
+      last_name: checkout.billing.last_name || '',
+      email: checkout.billing.email || '',
+      phone_number: checkout.billing.phone || '',
+      document: documentValue,
+      address: checkout.billing.address_1 || '',
+      address_2: checkout.billing.address_2 || '',
+      city: checkout.billing.city || '',
+      state: checkout.billing.state || '',
+      country: checkout.billing.country || st.country,
+      postal_code: checkout.billing.postcode || st.postcode_default || ''
+    },
+    payment: {
+      method_id: checkout.payment_method,
+      method_title: paymentTitle,
+      mode: checkout.payment_method === 'cod' ? 'contra_entrega' : 'online_o_manual'
+    },
+    products,
+    total,
+    note: checkout.customer_note || '',
+    copy_text: ''
+  };
+}
+function platformPayloadToText(payload = {}) {
+  const c = payload.customer || {};
+  const products = (payload.products || []).map((p) => `- ${p.quantity}x ${p.name}${p.variation ? ` (${p.variation})` : ''} | SKU ${p.sku || 'N/D'} | ${p.price || 0}`).join('
+');
+  return [
+    `PLATAFORMA: ${payload.platform || ''}`,
+    `PAIS: ${payload.country || ''}`,
+    `NOMBRE: ${c.full_name || ''}`,
+    `DOCUMENTO: ${c.document || ''}`,
+    `TELEFONO: ${c.phone_number || ''}`,
+    `EMAIL: ${c.email || ''}`,
+    `DIRECCION: ${c.address || ''} ${c.address_2 || ''}`.trim(),
+    `CIUDAD: ${c.city || ''}`,
+    `DEPARTAMENTO/REGION: ${c.state || ''}`,
+    `CODIGO POSTAL: ${c.postal_code || ''}`,
+    `METODO PAGO: ${payload.payment?.method_title || payload.payment?.method_id || ''}`,
+    `TOTAL: ${payload.total || 0} ${payload.currency || ''}`,
+    'PRODUCTOS:',
+    products || '- Sin productos',
+    payload.note ? `NOTA: ${payload.note}` : ''
+  ].filter(Boolean).join('
+');
+}
+app.post('/platform/export-sale', async (req, res, next) => {
+  try {
+    const st = storeFromReq(req);
+    const payload = buildPlatformSalePayload(req.body || {}, st);
+    payload.copy_text = platformPayloadToText(payload);
+    res.json({ ok: true, payload, copy_text: payload.copy_text });
+  } catch (error) { next(error); }
+});
+app.post('/chatwoot/enviar-resumen-venta', async (req, res, next) => {
+  try {
+    const client = chatwootClient();
+    if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
+    const { conversationId, message, privateNote = false, labels = [] } = req.body || {};
+    if (!conversationId || !message) return res.status(400).json({ error: 'conversationId y message son obligatorios' });
+    const { data } = await client.post(`/conversations/${conversationId}/messages`, { content: message, message_type: 'outgoing', private: Boolean(privateNote), content_type: 'text' });
+    if (labels.length) {
+      const existing = await getConversationLabels(client, conversationId);
+      await client.post(`/conversations/${conversationId}/labels`, { labels: Array.from(new Set([...existing, ...labels.map(cleanLabel).filter(Boolean)])) });
+    }
+    res.json({ ok: true, data });
+  } catch (error) { next(error); }
+});
+
 app.post('/crear-pedido', async (req, res, next) => {
   try {
-    const payload = normalizeCheckout(req.body);
-    await validateStock(payload.line_items);
-    const { data: order } = await wc.post('/orders', payload);
-    res.status(201).json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', checkout_url: getOrderPayUrl(order), payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
+    const st = storeFromReq(req);
+    const payload = normalizeCheckout(req.body, st);
+    await validateStock(payload.line_items, st);
+    const { data: order } = await wcForStore(st).post('/orders', payload);
+    res.status(201).json({ ok: true, store: st.id, country: st.country, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || st.currency || 'CLP', checkout_url: getOrderPayUrl(order, st), payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
   } catch (error) { next(error); }
 });
 app.post('/pagar', async (req, res, next) => {
@@ -740,12 +989,15 @@ app.post('/pagar', async (req, res, next) => {
     if (!orderId) return res.status(400).json({ error: 'orderId es obligatorio' });
 
     if (mode === 'woocommerce' || process.env.PAYMENT_LINK_PROVIDER === 'woocommerce') {
-      const gatewayId = preferredWooPaymentGateway(req.body || {});
+      const st=storeFromReq(req);
+    const gatewayId = preferredWooPaymentGateway(req.body || {}, st);
       const gatewayTitle = req.body?.payment_method_title || req.body?.gateway_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Flow - Webpay / Multicaja';
-      const { data: order } = await wc.put(`/orders/${Number(orderId)}`, { payment_method: gatewayId, payment_method_title: gatewayTitle, status: 'pending' });
-      const url = getOrderPayUrl(order);
+      const { data: order } = await wcForStore(st).put(`/orders/${Number(orderId)}`, { payment_method: gatewayId, payment_method_title: gatewayTitle, status: 'pending' });
+      const url = getOrderPayUrl(order, st);
       if (!url) return res.status(502).json({ error: 'WooCommerce no retorno link de pago.' });
-      return res.json({ ok: true, provider: 'woocommerce', url, pedido: { id: order.id, numero: order.number, total: order.total, moneda: order.currency || 'CLP', payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
+      return res.json({ ok: true, provider: 'woocommerce', url, pedido: { id: order.id, numero: order.number, total: order.total, moneda: order.currency || st.currency || 'CLP',
+          store_id: st.id,
+          country: st.country, payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
     }
 
     if (!process.env.FLOW_API_KEY || !process.env.FLOW_SECRET_KEY) return res.status(400).json({ error: 'Faltan credenciales Flow' });
@@ -754,7 +1006,7 @@ app.post('/pagar', async (req, res, next) => {
     const urlConfirmation = process.env.FLOW_URL_CONFIRMATION || `${publicBase}/flow/confirmacion`;
     const urlReturn = process.env.FLOW_URL_RETURN || `${publicBase}/flow/retorno`;
     if (!/^https:\/\/[^\s]+/i.test(urlConfirmation) || !/^https:\/\/[^\s]+/i.test(urlReturn)) return res.status(400).json({ error: 'FLOW_URL_CONFIRMATION y FLOW_URL_RETURN deben ser URLs publicas HTTPS validas.' });
-    const params = { apiKey: process.env.FLOW_API_KEY, commerceOrder: `${orderId}-${Date.now()}`, subject: subject || `Pedido WooCommerce #${orderId}`, currency: 'CLP', amount: Math.round(Number(amount)), email, paymentMethod: process.env.FLOW_PAYMENT_METHOD || '9', urlConfirmation, urlReturn, optional: JSON.stringify({ orderId }) };
+    const params = { apiKey: process.env.FLOW_API_KEY, commerceOrder: `${orderId}-${Date.now()}`, subject: subject || `Pedido WooCommerce #${orderId}`, currency: (storeFromReq(req).currency || 'CLP'), amount: Math.round(Number(amount)), email, paymentMethod: process.env.FLOW_PAYMENT_METHOD || '9', urlConfirmation, urlReturn, optional: JSON.stringify({ orderId }) };
     const { data } = await axios.post(`${FLOW_API_URL}/payment/create`, buildFlowPayload(params), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 20000 });
     if (!data?.url || !data?.token) return res.status(502).json({ error: 'Flow no retorno URL/token', detalle: data });
     res.json({ ok: true, provider: 'flow_direct', url: `${data.url}?token=${data.token}`, token: data.token, flow_order: data.flowOrder || null });
@@ -830,6 +1082,39 @@ const DEFAULT_CHATWOOT_ATTRIBUTES = [
   { attribute_display_name:'Rivaida carrito total', attribute_key:'rivaida_carrito_total', attribute_description:'Total estimado del carrito', attribute_display_type:1, attribute_model:0 },
   { attribute_display_name:'Rivaida rut validado', attribute_key:'rivaida_rut_validado', attribute_description:'RUT validado desde el panel', attribute_display_type:7, attribute_model:0 }
 ];
+
+async function sendChatwootProductMessage(client, conversationId, content, img, privateNote, contentAttributes) {
+  const wantsAttachment = img && getCfg('CHATWOOT_SEND_IMAGE_ATTACHMENT','true') !== 'false';
+  if (wantsAttachment) {
+    try {
+      const imageResp = await axios.get(img, { responseType: 'arraybuffer', timeout: Number(getCfg('IMAGE_FETCH_TIMEOUT_MS','15000')), maxContentLength: Number(getCfg('IMAGE_MAX_BYTES','8000000')) });
+      const mime = String(imageResp.headers['content-type'] || 'image/jpeg').split(';')[0];
+      if (!mime.startsWith('image/')) throw new Error(`La URL no retorno imagen valida: ${mime}`);
+      const filename = `producto-${Date.now()}.${mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg'}`;
+      const form = new FormData();
+      form.append('content', content);
+      form.append('message_type', 'outgoing');
+      form.append('private', String(Boolean(privateNote)));
+      form.append('content_type', 'text');
+      form.append('content_attributes', JSON.stringify(contentAttributes || {}));
+      form.append('attachments[]', Buffer.from(imageResp.data), { filename, contentType: mime });
+      const { data } = await client.post(`/conversations/${conversationId}/messages`, form, { headers: form.getHeaders() });
+      return { data, sentAsAttachment: true, imageFallback: false };
+    } catch (e) {
+      console.warn('[Chatwoot imagen adjunta] fallback texto:', e.response?.data || e.message);
+    }
+  }
+  const fallbackContent = [content, img ? `Imagen: ${img}` : ''].filter(Boolean).join('\n');
+  const { data } = await client.post(`/conversations/${conversationId}/messages`, {
+    content: fallbackContent,
+    message_type: 'outgoing',
+    private: Boolean(privateNote),
+    content_type: 'text',
+    content_attributes: { ...(contentAttributes || {}), image_url: img || undefined }
+  });
+  return { data, sentAsAttachment: false, imageFallback: Boolean(img) };
+}
+
 function productImageUrl(product = {}, variation = null) { return variation?.imagen || product?.imagen || product?.imagenes?.[0]?.src || ''; }
 
 app.post('/chatwoot/enviar-producto', async (req, res, next) => {
@@ -842,7 +1127,6 @@ app.post('/chatwoot/enviar-producto', async (req, res, next) => {
     const attrs = variation?.atributos?.map(a => `${a.name}: ${a.option}`).join(' / ') || '';
     const img = imageUrl || productImageUrl(product, variation);
     const content = [
-      img ? `Imagen: ${img}` : '',
       `Producto: ${product.nombre}`,
       attrs ? `Variacion: ${attrs}` : '',
       `SKU: ${variation?.sku || product.sku || 'N/D'}`,
@@ -850,20 +1134,14 @@ app.post('/chatwoot/enviar-producto', async (req, res, next) => {
       `Cantidad sugerida: ${quantity}`,
       product.permalink ? `Link: ${product.permalink}` : ''
     ].filter(Boolean).join('\n');
-    await client.post(`/conversations/${conversationId}/messages`, {
-      content,
-      message_type: 'outgoing',
-      private: Boolean(privateNote),
-      content_type: 'text',
-      content_attributes: { image_url: img || undefined, product_id: product.id, variation_id: variation?.id || undefined, sku: variation?.sku || product.sku || '', price: Number(price || 0) }
-    });
+    const mediaResult = await sendChatwootProductMessage(client, conversationId, content, img, privateNote, { product_id: product.id, variation_id: variation?.id || undefined, sku: variation?.sku || product.sku || '', price: Number(price || 0) });
     if (autoLabels) {
       const existing = await getConversationLabels(client, conversationId);
       await client.post(`/conversations/${conversationId}/labels`, { labels: Array.from(new Set([...existing, 'rivaida_interesado', 'rivaida_producto_enviado'])) });
     }
     const attrsPayload = { rivaida_estado: 'producto_enviado', rivaida_ultimo_producto: product.nombre, rivaida_ultimo_sku: variation?.sku || product.sku || '', rivaida_ultima_imagen: img || '', ...custom_attributes };
     try { await client.post(`/conversations/${conversationId}/custom_attributes`, { custom_attributes: attrsPayload }); } catch (e) { console.warn('[Chatwoot atributos envio]', e.response?.data || e.message); }
-    res.json({ ok: true, message: 'Producto enviado a Chatwoot', image_sent_as_url: Boolean(img), imageUrl: img });
+    res.json({ ok: true, message: mediaResult.sentAsAttachment ? 'Producto enviado a Chatwoot con imagen adjunta' : 'Producto enviado a Chatwoot con enlace de imagen', image_sent_as_attachment: mediaResult.sentAsAttachment, image_fallback_url: mediaResult.imageFallback, imageUrl: img });
   } catch (error) { next(error); }
 });
 
@@ -958,5 +1236,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v7.3 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v7.5 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

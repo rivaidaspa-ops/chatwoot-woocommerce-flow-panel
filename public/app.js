@@ -4,6 +4,8 @@ const state = {
   cliente: null,
   pedidos: [],
   productos: [],
+  stores: [],
+  activeStore: localStorage.getItem('activeStore') || 'cl',
   regiones: [],
   categorias: [],
   paymentMethods: [],
@@ -20,10 +22,12 @@ const state = {
   orderSearchResults: [],
   recommendations: null,
   chatwootContext: null,
-  chatwootReady: false
+  chatwootReady: false,
+  settings: {}
 };
 const $ = (id) => document.getElementById(id);
-const money = (v) => `$${Number(v || 0).toLocaleString('es-CL')} CLP`;
+function currentStore(){ return state.stores.find(s => s.id === state.activeStore) || { id: state.activeStore, country: state.activeStore === 'co' ? 'CO' : 'CL', currency: state.activeStore === 'co' ? 'COP' : 'CLP', document_label: state.activeStore === 'co' ? 'CC / NIT' : 'RUT' }; }
+const money = (v) => `${Number(v || 0).toLocaleString(currentStore().country === 'CO' ? 'es-CO' : 'es-CL')} ${currentStore().currency || 'CLP'}`;
 const text = (v) => String(v ?? '').replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
 const normalize = (s='') => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 
@@ -59,6 +63,11 @@ function renderChatwootContext(ctx, source='Chatwoot') {
   if (ctx?.conversationId && $('conversationId')) $('conversationId').value = ctx.conversationId;
   if (ctx?.email && $('customerEmail')) $('customerEmail').value = ctx.email;
   if (ctx?.phone && $('billingPhone') && !$('billingPhone').value) $('billingPhone').value = ctx.phone;
+  if (ctx?.name && $('billingFirstName') && !$('billingFirstName').value) {
+    const parts = String(ctx.name).trim().split(/\s+/);
+    $('billingFirstName').value = parts.shift() || '';
+    if ($('billingLastName') && !$('billingLastName').value) $('billingLastName').value = parts.join(' ');
+  }
   const status = $('chatwootContextStatus');
   if (status) status.textContent = ctx?.conversationId ? `Conectado a conversación #${ctx.conversationId}` : 'Contexto recibido sin ID de conversación';
   const box = $('chatwootContextBox');
@@ -118,8 +127,22 @@ function authHeaders() {
   else if (state.auth) headers.Authorization = `Basic ${state.auth}`;
   return headers;
 }
+function pathWithStore(path) {
+  if (!path.startsWith('/') || path.startsWith('/stores') || path.startsWith('/paises') || path.startsWith('/health')) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}store=${encodeURIComponent(state.activeStore)}`;
+}
+function bodyWithStore(options = {}) {
+  if (!options.body || typeof options.body !== 'string') return options.body;
+  try {
+    const parsed = JSON.parse(options.body);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) { const st = currentStore(); parsed.store = st.id; parsed.store_id = st.id; parsed.country = st.country; return JSON.stringify(parsed); }
+  } catch {}
+  return options.body;
+}
 async function api(path, options = {}) {
-  const res = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) }, credentials: 'same-origin' });
+  const finalOptions = { ...options, body: bodyWithStore(options) };
+  const res = await fetch(pathWithStore(path), { ...finalOptions, headers: { ...authHeaders(), ...(options.headers || {}) }, credentials: 'same-origin' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'Error de servidor');
   return data;
@@ -138,6 +161,8 @@ function saveLocal(key, value) { localStorage.setItem(key, JSON.stringify({ valu
 function readLocal(key, maxAgeMs) { try { const raw = JSON.parse(localStorage.getItem(key) || 'null'); if (!raw || Date.now() - raw.time > maxAgeMs) return null; return raw.value; } catch { return null; } }
 async function enterApp() {
   showApp();
+  await loadSettings().catch(()=>{});
+  await loadStores();
   await loadRegiones();
   await loadCategorias();
   await loadPaymentMethods();
@@ -150,16 +175,37 @@ async function enterApp() {
 async function testAuth() {
   readUrlParams();
   if (!state.auth && !state.panelToken) return showLogin();
-  try { await api('/regiones'); await enterApp(); }
+  try { await api('/stores'); await enterApp(); }
   catch { localStorage.removeItem('panelAuth'); if (!state.panelToken) showLogin(); else showLogin(); }
 }
+async function loadStores() {
+  try {
+    const data = await api('/stores'); state.stores = data.stores || [];
+    if (!state.stores.find(s => s.id === state.activeStore)) state.activeStore = data.default_store || state.stores[0]?.id || 'cl';
+    const sel = $('storeSelect'); if (sel) { sel.innerHTML = state.stores.map(s => `<option value="${text(s.id)}">${text(s.name || s.id)} · ${text(s.country || s.code || '')}</option>`).join(''); sel.value = state.activeStore; }
+    applyStoreUI();
+  } catch (e) { console.warn('No se pudieron cargar tiendas:', e.message); }
+}
+function applyStoreUI() {
+  const st = currentStore();
+  if ($('brandMark')) $('brandMark').textContent = st.country || st.id.toUpperCase();
+  if ($('checkoutTitle')) $('checkoutTitle').textContent = st.country === 'CO' ? 'Checkout Colombia' : 'Checkout Chile';
+  if ($('countryPill')) $('countryPill').textContent = `${st.currency || ''} · ${st.country === 'CO' ? 'Dropi / Wompi / Bold / COD' : 'WooCommerce Flow'}`;
+  if ($('platformPill')) $('platformPill').textContent = st.country === 'CO' ? 'Dropi Colombia' : 'WooCommerce';
+  if ($('billingRut')) $('billingRut').placeholder = st.country === 'CO' ? 'Documento: CC / NIT' : 'RUT: 12.345.678-9';
+  if ($('docHelp')) $('docHelp').innerHTML = st.country === 'CO' ? 'Documento compatible con WooCommerce/Dropi. El departamento se envia como codigo Dropi.' : 'El RUT se guarda en campos esenciales: billing_rut y shipping_rut.';
+  if ($('billingPhone')) $('billingPhone').placeholder = st.country === 'CO' ? 'Telefono +57' : 'Telefono +56';
+}
+async function changeStore(storeId) {
+  state.activeStore = storeId || 'cl'; localStorage.setItem('activeStore', state.activeStore);
+  state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null;
+  applyStoreUI(); await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); renderCart(); renderOrders([]); await loadProducts(true);
+}
 async function loadRegiones(force=false) {
-  const cached = !force && readLocal('regionesChileV70', 86400000 * 30);
+  const key = `regiones_${state.activeStore}_v74`;
+  const cached = !force && readLocal(key, 86400000 * 30);
   if (cached) { state.regiones = cached; renderRegionOptions(); return; }
-  const data = await api('/regiones');
-  state.regiones = data.regiones || [];
-  saveLocal('regionesChileV70', state.regiones);
-  renderRegionOptions();
+  const data = await api('/regiones'); state.regiones = data.regiones || []; saveLocal(key, state.regiones); renderRegionOptions();
 }
 async function loadCategorias(force=false) {
   try {
@@ -176,9 +222,12 @@ async function loadPaymentMethods(force=false) {
     state.paymentMethods = data.methods || [];
     const sel = $('paymentMethod');
     if (sel && state.paymentMethods.length) {
-      sel.innerHTML = state.paymentMethods.map((m) => `<option value="${text(m.id)}">${text(m.title || m.id)}</option>`).join('');
-      const flow = state.paymentMethods.find((m) => /flow|webpay|transbank|mercado|khipu/i.test(`${m.id} ${m.title}`));
-      if (flow) sel.value = flow.id;
+      sel.innerHTML = state.paymentMethods.map((m) => `<option value="${text(m.id)}">${text(m.title || m.id)}${m.preset ? ' · sugerido' : ''}</option>`).join('');
+      const st = currentStore();
+      const preferred = st.country === 'CO'
+        ? state.paymentMethods.find((m) => /cod|contra/i.test(`${m.id} ${m.title}`)) || state.paymentMethods.find((m) => /wompi|bold|pse|payu|epayco|mercado/i.test(`${m.id} ${m.title}`))
+        : state.paymentMethods.find((m) => /flow|webpay|transbank|mercado|khipu/i.test(`${m.id} ${m.title}`));
+      if (preferred) sel.value = preferred.id;
     }
   } catch (e) {
     console.warn('No se pudieron cargar métodos Woo:', e.message);
@@ -186,13 +235,13 @@ async function loadPaymentMethods(force=false) {
 }
 function renderRegionOptions() {
   if (!$('billingRegion')) return;
-  $('billingRegion').innerHTML = '<option value="">Seleccione region</option>' + state.regiones.map(r => `<option value="${text(r.codigo)}">${text(r.region)}</option>`).join('');
+  $('billingRegion').innerHTML = `<option value="">Seleccione ${currentStore().country === 'CO' ? 'departamento' : 'region'}</option>` + state.regiones.map(r => `<option value="${text(r.codigo)}">${text(r.region)}</option>`).join('');
 }
 function renderComunas(regionCode, selectedComuna='') {
   const region = state.regiones.find(r => r.codigo === regionCode);
   const comunas = region?.comunas || [];
   $('billingComuna').disabled = !comunas.length;
-  $('billingComuna').innerHTML = '<option value="">Seleccione comuna</option>' + comunas.map(c => `<option value="${text(c.comuna)}" data-postcode="${text(c.postcode)}">${text(c.comuna)}</option>`).join('');
+  $('billingComuna').innerHTML = `<option value="">Seleccione ${currentStore().country === 'CO' ? 'ciudad' : 'comuna'}</option>` + comunas.map(c => `<option value="${text(c.comuna)}" data-postcode="${text(c.postcode)}">${text(c.comuna)}</option>`).join('');
   if (selectedComuna) {
     const match = comunas.find(c => normalize(c.comuna) === normalize(selectedComuna));
     if (match) $('billingComuna').value = match.comuna;
@@ -213,14 +262,14 @@ function validateRutLocal(rut='') {
   return dv === expected;
 }
 function updateRutStatus() {
-  const rut = $('billingRut').value.trim(); const ok = validateRutLocal(rut);
-  $('rutStatus').textContent = rut ? (ok ? 'RUT valido' : 'RUT invalido') : 'RUT pendiente de validar';
-  $('rutStatus').className = `mini muted-line ${rut ? (ok ? 'ok' : 'bad') : ''}`;
+  const doc = $('billingRut').value.trim(); const st = currentStore(); const ok = st.country === 'CL' ? validateRutLocal(doc) : doc.replace(/[^0-9A-Za-z]/g,'').length >= 5;
+  $('rutStatus').textContent = doc ? (ok ? `${st.document_label || 'Documento'} valido` : `${st.document_label || 'Documento'} invalido`) : `${st.document_label || 'Documento'} pendiente`;
+  $('rutStatus').className = `mini muted-line ${doc ? (ok ? 'ok' : 'bad') : ''}`;
 }
 function renderClient() {
   const c = state.cliente; if (!c) return;
   const d = c.direccion || {};
-  $('clientInfo').innerHTML = `<div class="client-row"><strong>Nombre</strong><span>${text(c.nombre || 'No registrado')}</span></div><div class="client-row"><strong>Email</strong><span>${text(c.email || '')}</span></div><div class="client-row"><strong>RUT</strong><span>${text(c.rut || 'No registrado')}</span></div><div class="client-row"><strong>Telefono</strong><span>${text(c.telefono || d.phone || '')}</span></div><div class="client-row"><strong>Region</strong><span>${text(d.region_nombre || d.state || 'Sin region')}</span></div><div class="client-row"><strong>Direccion</strong><span>${text([d.address_1,d.address_2,d.city,d.postcode,d.country].filter(Boolean).join(', ') || 'Sin direccion')}</span></div>`;
+  $('clientInfo').innerHTML = `<div class="client-row"><strong>Nombre</strong><span>${text(c.nombre || 'No registrado')}</span></div><div class="client-row"><strong>Email</strong><span>${text(c.email || '')}</span></div><div class="client-row"><strong>${text(currentStore().document_label || 'Documento')}</strong><span>${text(c.rut || 'No registrado')}</span></div><div class="client-row"><strong>Telefono</strong><span>${text(c.telefono || d.phone || '')}</span></div><div class="client-row"><strong>Region</strong><span>${text(d.region_nombre || d.state || 'Sin region')}</span></div><div class="client-row"><strong>Direccion</strong><span>${text([d.address_1,d.address_2,d.city,d.postcode,d.country].filter(Boolean).join(', ') || 'Sin direccion')}</span></div>`;
   $('billingFirstName').value = d.first_name || c.nombre?.split(' ')[0] || '';
   $('billingLastName').value = d.last_name || c.nombre?.split(' ').slice(1).join(' ') || '';
   $('billingPhone').value = c.telefono || d.phone || '';
@@ -382,7 +431,7 @@ async function sendToConversation(product, quantity, variation=null) {
   if (!$('customerEmail')?.value?.trim()) await enrichContextFromServer(conversationId).catch(console.warn);
   const imageUrl = variation?.imagen || product?.imagen || product?.imagenes?.[0]?.src || '';
   await api('/chatwoot/enviar-producto', { method:'POST', body: JSON.stringify({ conversationId, product, variation, quantity, imageUrl, autoLabels: true }) });
-  alert('Producto enviado a la conversación con imagen/enlace, etiquetas y atributos.');
+  alert('Producto enviado a la conversación. Si Chatwoot/WhatsApp lo permite, la imagen se envió como adjunto real; si falla, se usa enlace de respaldo.');
 }
 function buildProductSearchParams(offset=0) {
   const params = new URLSearchParams();
@@ -399,7 +448,7 @@ async function loadProducts(force=false, append=false) {
   state.productLoading = true;
   const nextOffset = append ? state.productOffset : 0;
   if (!append) { showProductLoader(true, force ? 'Actualizando vista...' : 'Buscando productos...'); $('productsList').innerHTML = '<div class="skeleton-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div>'; }
-  setLoadingState(force ? 'Actualizando' : 'Buscando', 'Consultando cache, Postgres o WooCommerce');
+  setLoadingState(force ? 'Actualizando' : 'Buscando', 'Cargando catálogo rápido...');
   try {
     const endpoint = `/productos/search?${buildProductSearchParams(nextOffset)}${force ? '&refresh=true' : ''}`;
     const data = await api(endpoint);
@@ -408,7 +457,7 @@ async function loadProducts(force=false, append=false) {
     state.productTotal = Number(data.total || state.productos.length);
     state.productOffset = state.productos.length;
     renderProducts();
-    setLoadingState(data.source === 'postgres' ? 'Postgres' : (data.cached ? 'Cache' : 'WooCommerce'), `${state.productos.length}/${state.productTotal} productos`);
+    setLoadingState(data.cached ? 'Listo' : 'Actualizado', `${state.productos.length}/${state.productTotal} productos`);
   } catch (e) { alert(e.message); }
   finally { state.productLoading = false; showProductLoader(false); }
 }
@@ -444,16 +493,21 @@ function buildOrderPayload() {
   const regionCode = $('billingRegion').value;
   const comuna = $('billingComuna').value;
   const rut = $('billingRut').value.trim();
+  const st = currentStore();
   if (!state.cart.length) throw new Error('Agregue al menos un producto.');
   const required = ['billingFirstName','billingLastName','billingRut','billingPhone','billingAddress'];
-  for (const id of required) if (!$(id).value.trim()) throw new Error('Complete nombre, apellido, RUT, telefono y direccion.');
-  if (!validateRutLocal(rut)) throw new Error('Ingrese un RUT valido.');
-  if (!regionCode || !comuna) throw new Error('Seleccione region y comuna.');
+  for (const id of required) if (!$(id).value.trim()) throw new Error(`Complete nombre, apellido, ${st.document_label || 'documento'}, telefono y direccion.`);
+  if (st.country === 'CL' && !validateRutLocal(rut)) throw new Error('Ingrese un RUT valido.');
+  if (st.country === 'CO' && rut.replace(/[^0-9A-Za-z]/g,'').length < 5) throw new Error('Ingrese documento valido para Colombia.');
+  if (!regionCode || !comuna) throw new Error(st.country === 'CO' ? 'Seleccione departamento y ciudad.' : 'Seleccione region y comuna.');
   const regionObj = state.regiones.find(r => r.codigo === regionCode) || {};
   const regionName = regionObj.region || regionCode;
-  const billing = { first_name:$('billingFirstName').value.trim(), last_name:$('billingLastName').value.trim(), email, phone:$('billingPhone').value.trim(), address_1:$('billingAddress').value.trim(), address_2:$('billingAddress2').value.trim(), city:comuna, postcode:$('billingPostcode').value.trim(), state:regionName, country:'CL' };
+  const billing = { first_name:$('billingFirstName').value.trim(), last_name:$('billingLastName').value.trim(), email, phone:$('billingPhone').value.trim(), address_1:$('billingAddress').value.trim(), address_2:$('billingAddress2').value.trim(), city:comuna, postcode:$('billingPostcode').value.trim() || (st.country === 'CO' ? '110111' : ''), state:regionCode, country:st.country };
   return {
     rut,
+    document: rut,
+    store_id: st.id,
+    country: st.country,
     region: regionName,
     region_codigo: regionCode,
     region_nombre: regionName,
@@ -468,6 +522,84 @@ function buildOrderPayload() {
     meta_data:[{key:'_chatwoot_conversation_id', value:$('conversationId').value.trim()}]
   };
 }
+
+function buildPlatformPayloadLocal() {
+  const payload = buildOrderPayload();
+  const st = currentStore();
+  const products = state.cart.map((item) => ({
+    product_id: item.product.id,
+    variation_id: item.variation?.id || null,
+    name: item.product.nombre,
+    sku: item.variation?.sku || item.product.sku || '',
+    quantity: item.quantity,
+    price: Number(item.variation?.precio || item.product.precio || 0),
+    variation: item.variation ? variationLabel(item.variation) : '',
+    image: cartItemImage(item),
+    permalink: item.product.permalink || ''
+  }));
+  const total = products.reduce((sum, p) => sum + Number(p.price || 0) * Number(p.quantity || 1), 0);
+  return {
+    platform: st.country === 'CO' ? 'dropi_colombia' : 'woocommerce',
+    store_id: st.id,
+    country: st.country,
+    currency: st.currency,
+    customer: {
+      full_name: `${payload.billing.first_name} ${payload.billing.last_name}`.trim(),
+      first_name: payload.billing.first_name,
+      last_name: payload.billing.last_name,
+      document: payload.document || payload.rut,
+      email: payload.billing.email,
+      phone_number: payload.billing.phone,
+      address: payload.billing.address_1,
+      address_2: payload.billing.address_2,
+      city: payload.billing.city,
+      state: payload.billing.state,
+      postal_code: payload.billing.postcode,
+      country: payload.billing.country
+    },
+    payment: { method_id: payload.payment_method, method_title: payload.payment_method_title, mode: payload.payment_method === 'cod' ? 'contra_entrega' : 'online_o_manual' },
+    products,
+    total,
+    note: payload.customer_note
+  };
+}
+function platformPayloadToTextLocal(payload) {
+  const c = payload.customer || {};
+  const products = (payload.products || []).map(p => `- ${p.quantity}x ${p.name}${p.variation ? ` (${p.variation})` : ''} | SKU ${p.sku || 'N/D'} | ${p.price}`).join('
+');
+  return [`PLATAFORMA: ${payload.platform}`,`PAIS: ${payload.country}`,`NOMBRE: ${c.full_name}`,`DOCUMENTO: ${c.document}`,`TELEFONO: ${c.phone_number}`,`EMAIL: ${c.email}`,`DIRECCION: ${c.address} ${c.address_2 || ''}`.trim(),`CIUDAD: ${c.city}`,`DEPARTAMENTO/REGION: ${c.state}`,`CODIGO POSTAL: ${c.postal_code}`,`METODO PAGO: ${payload.payment?.method_title || payload.payment?.method_id}`,`TOTAL: ${payload.total} ${payload.currency}`,'PRODUCTOS:',products || '- Sin productos',payload.note ? `NOTA: ${payload.note}` : ''].filter(Boolean).join('
+');
+}
+async function copyPlatformData(format='text') {
+  try {
+    const localPayload = buildPlatformPayloadLocal();
+    let output = '';
+    try {
+      const data = await api('/platform/export-sale', { method:'POST', body: JSON.stringify({ ...buildOrderPayload(), cart: state.cart }) });
+      output = format === 'json' ? JSON.stringify(data.payload, null, 2) : data.copy_text;
+    } catch (_) {
+      output = format === 'json' ? JSON.stringify(localPayload, null, 2) : platformPayloadToTextLocal(localPayload);
+    }
+    if ($('platformOutput')) $('platformOutput').value = output;
+    await navigator.clipboard?.writeText(output).catch(()=>{});
+    alert(format === 'json' ? 'JSON técnico copiado.' : 'Datos listos para pegar en plataforma copiados.');
+  } catch(e) { alert(e.message); }
+}
+async function sendSaleSummaryToChat() {
+  try {
+    let conversationId = $('conversationId').value.trim();
+    if (!conversationId) { requestChatwootContext(); await new Promise(r => setTimeout(r, 600)); conversationId = $('conversationId').value.trim(); }
+    if (!conversationId) return alert('No se detectó ID de conversación Chatwoot.');
+    const data = await api('/platform/export-sale', { method:'POST', body: JSON.stringify({ ...buildOrderPayload(), cart: state.cart }) });
+    const msg = `Resumen de compra
+
+${data.copy_text}`;
+    await api('/chatwoot/enviar-resumen-venta', { method:'POST', body: JSON.stringify({ conversationId, message: msg, labels: ['rivaida_compra_chat', currentStore().country === 'CO' ? 'dropi' : 'chile'] }) });
+    if ($('platformOutput')) $('platformOutput').value = data.copy_text;
+    alert('Resumen enviado a la conversación.');
+  } catch(e) { alert(e.message); }
+}
+
 async function createOrder() {
   $('orderStatus').textContent='';
   try {
@@ -637,7 +769,9 @@ function recommendationPayload() {
     rut: $('billingRut')?.value?.trim() || '',
     region: $('billingRegion')?.value || '',
     comuna: $('billingComuna')?.value || '',
-    conversationId: $('conversationId')?.value?.trim() || ''
+    conversationId: $('conversationId')?.value?.trim() || '',
+    store: state.activeStore,
+    country: currentStore().country
   };
 }
 function renderRecommendations(rec) {
@@ -696,8 +830,57 @@ async function saveConversationAttributes() {
   alert('Atributos guardados en la conversación.');
 }
 
-async function clearCache() { localStorage.removeItem('regionesChileV70'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
-$('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/regiones'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
+
+function toggleSettings(show=true) {
+  const panel = $('settingsPanel');
+  if (!panel) return;
+  panel.classList.toggle('hidden', !show);
+  if (show) loadSettings().catch(e => { if ($('settingsStatus')) $('settingsStatus').textContent = e.message; });
+}
+function fillSettingsForm(settings = {}) {
+  document.querySelectorAll('[data-setting]').forEach((el) => {
+    const key = el.dataset.setting;
+    el.value = settings[key] ?? '';
+  });
+}
+function collectSettingsForm() {
+  const settings = {};
+  document.querySelectorAll('[data-setting]').forEach((el) => { settings[el.dataset.setting] = el.value.trim(); });
+  return settings;
+}
+async function loadSettings() {
+  const data = await api('/admin/settings');
+  state.settings = data.settings || {};
+  fillSettingsForm(state.settings);
+  if ($('settingsStatus')) $('settingsStatus').textContent = data.postgres ? 'Configuración guardada correctamente.' : 'Configuración temporal: revisa la conexión de base de datos.';
+}
+async function saveSettings() {
+  const settings = collectSettingsForm();
+  const data = await api('/admin/settings', { method:'POST', body: JSON.stringify({ settings }) });
+  state.settings = { ...state.settings, ...settings };
+  if ($('settingsStatus')) $('settingsStatus').textContent = `Guardado: ${data.saved_keys?.length || 0} variables. Recargando tiendas...`;
+  await loadSettings().catch(()=>{});
+  await loadStores();
+  await loadRegiones(true);
+  await loadCategorias(true);
+  await loadPaymentMethods(true);
+  alert('Credenciales guardadas. Si cambiaste dominio o CORS, ejecuta Deploy/Restart en EasyPanel para asegurar proxy y caché limpios.');
+}
+async function testSettings(target, store='') {
+  try {
+    const data = await api('/admin/settings/test', { method:'POST', body: JSON.stringify({ target, store }) });
+    alert(`Prueba correcta: ${JSON.stringify(data, null, 2)}`);
+  } catch (e) { alert(`Error en prueba: ${e.message}`); }
+}
+
+async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v74`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
+$('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/stores'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
+$('openSettingsBtn')?.addEventListener('click', () => toggleSettings(true));
+$('closeSettingsBtn')?.addEventListener('click', () => toggleSettings(false));
+$('saveSettingsBtn')?.addEventListener('click', saveSettings);
+$('testWooClBtn')?.addEventListener('click', () => testSettings('woo','cl'));
+$('testWooCoBtn')?.addEventListener('click', () => testSettings('woo','co'));
+$('testChatwootBtn')?.addEventListener('click', () => testSettings('chatwoot'));
 $('logoutBtn').addEventListener('click', ()=>{ localStorage.removeItem('panelAuth'); localStorage.removeItem('panelToken'); state.auth=''; state.panelToken=''; showLogin(); });
 $('loadBtn').addEventListener('click', () => loadPanel(false));
 $('refreshOrdersBtn')?.addEventListener('click', () => loadPanel(true));
@@ -710,6 +893,9 @@ $('categoryFilter')?.addEventListener('change', () => loadProducts(false));
 $('saleFilter')?.addEventListener('change', () => loadProducts(false));
 $('stockFilter')?.addEventListener('change', () => loadProducts(false));
 $('createOrderBtn').addEventListener('click', createOrder); $('payBtn').addEventListener('click', payOrder);
+$('copyPlatformBtn')?.addEventListener('click', () => copyPlatformData('text'));
+$('copyPlatformJsonBtn')?.addEventListener('click', () => copyPlatformData('json'));
+$('sendSaleSummaryBtn')?.addEventListener('click', sendSaleSummaryToChat);
 $('billingRegion').addEventListener('change', () => renderComunas($('billingRegion').value));
 $('billingComuna').addEventListener('change', updatePostcode);
 $('billingRut').addEventListener('input', updateRutStatus);
@@ -731,6 +917,7 @@ $('flowOrderDrawerBtn')?.addEventListener('click', flowSelectedOrder);
 $('searchOrdersBtn')?.addEventListener('click', searchOrders);
 $('clearOrderSearchBtn')?.addEventListener('click', clearOrderSearch);
 $('orderSearchInput')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter') searchOrders(); });
+$('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value).catch(e => alert(e.message)));
 $('themeMode')?.addEventListener('change', () => updateTheme($('themeMode').value, $('themeAccent')?.value));
 $('themeAccent')?.addEventListener('change', () => updateTheme($('themeMode')?.value, $('themeAccent').value));
 applyThemeSettings();

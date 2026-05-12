@@ -1,7 +1,7 @@
 {
   "name": "chatwoot-woocommerce-flow-panel",
-  "version": "1.7.3",
-  "description": "Panel Chatwoot WooCommerce Chile v7.3 Chatwoot auto context, image URL messages, labels and attributes",
+  "version": "1.7.6",
+  "description": "Panel Chatwoot WooCommerce multi-pais v7.5 con credenciales en interfaz e imagen adjunta WhatsApp/Chatwoot",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -15,7 +15,8 @@
     "helmet": "^8.0.0",
     "morgan": "^1.10.0",
     "ioredis": "^5.4.2",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "form-data": "^4.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.9"

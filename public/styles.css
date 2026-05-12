@@ -87,3 +87,16 @@ button.warning{background:#f59e0b;color:#fff}button.warning:hover{background:#d9
 .tag-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .8rem; }
 [data-theme="dark"] .chatwoot-context-box span, [data-theme="dark"] .chatwoot-context-box strong { background: rgba(15,23,42,.6); color: #e5e7eb; }
 @media (max-width: 720px) { .chatwoot-context-card { grid-template-columns: 1fr; } }
+.store-controls{display:flex;flex-direction:column;gap:4px;min-width:180px}.store-controls label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.store-controls select{border:1px solid var(--border);border-radius:14px;padding:10px 12px;background:var(--card);color:var(--text);font-weight:700}.country-badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:4px 10px;background:rgba(14,95,90,.1);font-size:12px;font-weight:700}
+
+
+.settings-panel { border: 1px solid var(--border); background: var(--card); }
+.settings-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:16px; }
+.settings-group { border:1px solid var(--border); border-radius:18px; padding:16px; background: var(--surface, rgba(255,255,255,.65)); }
+.settings-group h3 { margin:0 0 12px; font-size:1rem; }
+.settings-group label { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; font-size:.86rem; color:var(--muted); }
+.settings-group input,.settings-group select { width:100%; border:1px solid var(--border); border-radius:12px; padding:10px 12px; background:var(--input-bg,#fff); color:var(--text); }
+.settings-actions { display:flex; align-items:center; gap:12px; margin-top:16px; flex-wrap:wrap; }
+
+/* v7.6 Colombia payments + platform copy */
+.mini-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:8px}.mini-grid label{margin:0}.platform-card{border:1px solid rgba(14,95,90,.12);background:linear-gradient(180deg,rgba(14,95,90,.04),rgba(255,255,255,.9))}.platform-actions{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px}.platform-output{min-height:170px;width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.45;background:var(--surface-2,#f8fafc);border:1px solid var(--border,#e5e7eb);border-radius:14px;padding:12px;resize:vertical;color:var(--text,#111827)}@media(max-width:720px){.mini-grid{grid-template-columns:1fr}.platform-actions button{width:100%}}
