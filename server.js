@@ -1,4 +1,4 @@
-// v8.1: multitienda tolerante a credenciales faltantes, productos por tienda y mensajes claros.
+// v8.4 Rivaida Commerce Hub: aislamiento de tiendas Chile/Colombia, diagnosticos y logs.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -163,7 +163,20 @@ const redis = REDIS_URL ? new Redis(REDIS_URL, { maxRetriesPerRequest: 1, lazyCo
 const pgPool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, max: Number(process.env.PG_POOL_MAX || 5) }) : null;
 let dbReady = false;
 let redisReady = false;
-let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null };
+let dbReady = false;
+let redisReady = false;
+let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
+const APP_NAME = 'Rivaida Commerce Hub';
+const APP_VERSION = '8.4.0';
+const appLogs = [];
+function addLog(level, message, data = {}) {
+  const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
+  appLogs.unshift(entry);
+  if (appLogs.length > 200) appLogs.pop();
+  const line = `[${entry.level}] ${entry.message}${entry.store ? ' · ' + entry.store : ''}${entry.detail ? ' · ' + entry.detail : ''}`;
+  if (level === 'error') console.error(line); else if (level === 'warning' || level === 'warn') console.warn(line); else console.log(line);
+}
+
 
 if (redis) redis.connect().then(() => { redisReady = true; console.log('[Redis] conectado'); }).catch((e) => console.warn('[Redis] no conectado:', e.message));
 
@@ -220,7 +233,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.3-ai-country-coupons', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'rivaida-commerce-hub', app_name: APP_NAME, version: APP_VERSION, port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -466,6 +479,20 @@ async function productIndexCount(store = currentDefaultStore()) {
   if (!pgPool || !dbReady) return 0;
   try { const st = resolveStore(store); const { rows } = await pgPool.query('SELECT COUNT(*)::int AS count FROM product_index WHERE store_id=$1', [st.id]); return Number(rows[0]?.count || 0); } catch { return 0; }
 }
+
+function getMetaValue(metaData = [], keys = []) {
+  const normalizedKeys = (keys || []).map((k) => normalizeText(k));
+  for (const item of metaData || []) {
+    const key = normalizeText(item?.key || '');
+    if (normalizedKeys.includes(key)) return item?.value || '';
+  }
+  for (const item of metaData || []) {
+    const key = normalizeText(item?.key || '');
+    if (normalizedKeys.some((k) => key.includes(k))) return item?.value || '';
+  }
+  return '';
+}
+
 function extractMeta(metaData = []) {
   const result = {};
   for (const m of metaData || []) {
@@ -596,6 +623,7 @@ function filterProductsLocal(products, { q='', category='', sale=false, stock=''
     if (!nq) return true;
     return productSearchText(p).includes(nq);
   });
+  filtered = filtered.sort((a,b)=>((b.stock_status === 'instock') - (a.stock_status === 'instock')) || String(a.nombre).localeCompare(String(b.nombre),'es'));
   const total = filtered.length;
   return { productos: filtered.slice(Number(offset), Number(offset)+Number(limit)), total, source: 'memory' };
 }
@@ -603,6 +631,7 @@ async function runCatalogSync(store = resolveStore(currentDefaultStore())) {
   const st = resolveStore(store.id || store);
   const wc = wcForStore(st);
   if (syncJob.running) return;
+  addLog('info','Sincronización iniciada',{store:st.id});
   syncJob = { running: true, startedAt: new Date().toISOString(), finishedAt: null, page: 0, total: 0, indexed: 0, error: null };
   try {
     await cacheDelPrefix('productos:');
@@ -620,8 +649,10 @@ async function runCatalogSync(store = resolveStore(currentDefaultStore())) {
       page += 1;
     }
     syncJob.finishedAt = new Date().toISOString();
+    addLog('info','Sincronización terminada',{store:st.id, detail:`${syncJob.indexed} productos`});
   } catch (e) {
     syncJob.error = e.message;
+    addLog('error','Error sincronizando catálogo',{store:st.id, error:e.message});
     syncJob.finishedAt = new Date().toISOString();
   } finally {
     syncJob.running = false;
@@ -847,6 +878,12 @@ app.post('/admin/settings/test', async (req, res, next) => {
     return res.status(400).json({ error:'target no soportado' });
   } catch (error) { next(error); }
 });
+
+app.get('/diagnostics/status', async (req, res) => {
+  const stores = await Promise.all(listStores().map(async (st) => ({ ...st, index_count: await productIndexCount(st.id).catch(() => 0) })));
+  res.json({ ok:true, app_name:APP_NAME, version:APP_VERSION, active_default:currentDefaultStore(), redis:redisReady, postgres:dbReady, cache_items:memoryCache.size, sync:syncJob, stores, chatwoot:{ configured:Boolean((getCfg('CHATWOOT_URL') || '').trim() && (getCfg('CHATWOOT_API_KEY') || '').trim() && (getCfg('CHATWOOT_ACCOUNT_ID') || '').trim()), url:getCfg('CHATWOOT_URL') || '' }, logs:appLogs.slice(0,80) });
+});
+app.get('/diagnostics/logs', (req, res) => res.json({ ok:true, logs:appLogs.slice(0,200) }));
 
 app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
 
@@ -1373,6 +1410,7 @@ app.post('/chatwoot/enviar-producto', async (req, res, next) => {
   try {
     const client = chatwootClient();
     if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
+    const st = storeFromReq(req);
     const { conversationId, product, variation, quantity = 1, privateNote = false, imageUrl = '', autoLabels = true, custom_attributes = {} } = req.body;
     if (!conversationId || !product?.nombre) return res.status(400).json({ error: 'conversationId y producto son obligatorios' });
     const price = variation?.precio || product.precio || 0;
@@ -1382,18 +1420,19 @@ app.post('/chatwoot/enviar-producto', async (req, res, next) => {
       `Producto: ${product.nombre}`,
       attrs ? `Variacion: ${attrs}` : '',
       `SKU: ${variation?.sku || product.sku || 'N/D'}`,
-      `Precio: $${Number(price || 0).toLocaleString('es-CL')} CLP`,
+      `Precio: ${Number(price || 0).toLocaleString(st.country === 'CO' ? 'es-CO' : 'es-CL')} ${st.currency || 'CLP'}`,
       `Cantidad sugerida: ${quantity}`,
       product.permalink ? `Link: ${product.permalink}` : ''
     ].filter(Boolean).join('\n');
-    const mediaResult = await sendChatwootProductMessage(client, conversationId, content, img, privateNote, { product_id: product.id, variation_id: variation?.id || undefined, sku: variation?.sku || product.sku || '', price: Number(price || 0) });
+    const mediaResult = await sendChatwootProductMessage(client, conversationId, content, img, privateNote, { product_id: product.id, variation_id: variation?.id || undefined, sku: variation?.sku || product.sku || '', price: Number(price || 0), store_id: st.id, country: st.country });
     if (autoLabels) {
       const existing = await getConversationLabels(client, conversationId);
       await client.post(`/conversations/${conversationId}/labels`, { labels: Array.from(new Set([...existing, 'rivaida_interesado', 'rivaida_producto_enviado'])) });
     }
-    const attrsPayload = { rivaida_estado: 'producto_enviado', rivaida_ultimo_producto: product.nombre, rivaida_ultimo_sku: variation?.sku || product.sku || '', rivaida_ultima_imagen: img || '', ...custom_attributes };
+    const attrsPayload = { rivaida_estado: 'producto_enviado', rivaida_store: st.id, rivaida_country: st.country, rivaida_ultimo_producto: product.nombre, rivaida_ultimo_sku: variation?.sku || product.sku || '', rivaida_ultima_imagen: img || '', ...custom_attributes };
     try { await client.post(`/conversations/${conversationId}/custom_attributes`, { custom_attributes: attrsPayload }); } catch (e) { console.warn('[Chatwoot atributos envio]', e.response?.data || e.message); }
-    res.json({ ok: true, message: mediaResult.sentAsAttachment ? 'Producto enviado a Chatwoot con imagen adjunta' : 'Producto enviado a Chatwoot con enlace de imagen', image_sent_as_attachment: mediaResult.sentAsAttachment, image_fallback_url: mediaResult.imageFallback, imageUrl: img });
+    addLog('info','Producto enviado a Chatwoot',{store:st.id, detail: mediaResult.sentAsAttachment ? 'imagen adjunta' : 'fallback texto'});
+    res.json({ ok: true, store: st.id, country: st.country, message: mediaResult.sentAsAttachment ? 'Producto enviado a Chatwoot con imagen adjunta' : 'Producto enviado a Chatwoot con enlace de imagen', image_sent_as_attachment: mediaResult.sentAsAttachment, image_fallback_url: mediaResult.imageFallback, imageUrl: img });
   } catch (error) { next(error); }
 });
 
@@ -1490,5 +1529,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.3 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v8.4 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

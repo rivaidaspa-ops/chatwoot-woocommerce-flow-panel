@@ -1,7 +1,7 @@
 {
-  "name": "chatwoot-woocommerce-flow-panel",
-  "version": "8.3.0",
-  "description": "Panel Chatwoot WooCommerce multi-pais v8.2 cupones regiones ciudades y stock",
+  "name": "rivaida-commerce-hub",
+  "version": "8.4.0",
+  "description": "Rivaida Commerce Hub - Chatwoot, WooCommerce, Chile y Colombia sin cruce de tiendas",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

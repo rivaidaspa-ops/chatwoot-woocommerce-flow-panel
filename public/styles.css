@@ -136,7 +136,7 @@ body.modal-open{overflow:hidden}
 .coupon-main-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}.coupon-create-box{margin-top:10px}.coupon-create-box summary{cursor:pointer;font-weight:800;color:var(--text,#172033)}.coupon-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.coupon-grid button{grid-column:span 2}.coupon-results{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.coupon-pill{border:1px solid var(--line,#dbe7f5);border-radius:14px;background:var(--surface,#fff);color:var(--text,#172033);padding:8px 10px;display:flex;flex-direction:column;align-items:flex-start}.cart-coupon-line,.cart-total{display:flex;align-items:center;justify-content:space-between;gap:12px}.cart-coupon-line{margin-top:8px;color:#15803d;font-weight:800}.theme-dark .var-card,.theme-luxury .var-card,.theme-contrast .var-card{background:var(--surface,#111827);color:var(--text,#f8fafc)}.theme-dark .var-card span,.theme-dark .var-card strong,.theme-luxury .var-card span,.theme-luxury .var-card strong,.theme-contrast .var-card span,.theme-contrast .var-card strong{color:var(--text,#f8fafc)}.theme-dark .coupon-create-box summary,.theme-luxury .coupon-create-box summary,.theme-contrast .coupon-create-box summary{color:var(--text,#f8fafc)}
 @media (max-width:720px){.coupon-main-row,.coupon-grid{grid-template-columns:1fr}.coupon-grid button{grid-column:auto}}
 
-/* v8.3: asistente por país, prompts IA y cupon recomendado */
+/* v8.4: asistente por país, prompts IA y cupon recomendado */
 .ai-settings-wide textarea{width:100%;min-height:72px;border:1px solid var(--border,#d8e3f7);border-radius:14px;padding:10px;background:#fff;color:#172033;resize:vertical}
 .assistant-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;color:#13233b}
 .assistant-head span{font-size:12px;border-radius:999px;background:#e8f1ff;color:#1d55d9;padding:5px 10px;font-weight:700}
@@ -146,3 +146,25 @@ body.modal-open{overflow:hidden}
 .coupon-suggestion code{background:#ffffff;border:1px solid #d9e8ff;border-radius:8px;padding:2px 6px;color:#0d4ed8;font-weight:800}
 #couponAiHint{margin-top:6px;color:#456078}
 .settings-group textarea::placeholder{color:#8896aa}
+
+
+/* v8.4 country-separated UI and diagnostics */
+body.store-cl { --store-accent:#0e7490; --store-soft:#ecfeff; }
+body.store-co { --store-accent:#ca8a04; --store-soft:#fff7ed; }
+body.store-cl .topbar, body.store-cl .search-card { border-left: 5px solid #0e7490; }
+body.store-co .topbar, body.store-co .search-card { border-left: 5px solid #ca8a04; }
+.store-switch-state { grid-column:1/-1; border:1px dashed var(--border); border-radius:18px; padding:26px; background:var(--surface); color:var(--text); text-align:center; }
+.system-dialog { max-width: 1060px; }
+.system-status-grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(210px,1fr)); gap:12px; margin:14px 0; }
+.status-card { border:1px solid var(--border); background:var(--surface-2); border-radius:16px; padding:14px; display:flex; flex-direction:column; gap:6px; color:var(--text); }
+.status-card strong { color:var(--text); }
+.status-card small { color:var(--muted); overflow-wrap:anywhere; }
+.status-badge { display:inline-flex; width:max-content; padding:4px 9px; border-radius:999px; font-size:.78rem; font-weight:800; }
+.status-badge.ok { background:#dcfce7; color:#166534; }
+.status-badge.warn { background:#fef3c7; color:#92400e; }
+.logs-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:12px; }
+.logs-box { min-height:220px; max-height:360px; overflow:auto; border:1px solid var(--border); border-radius:14px; background:#0f172a; color:#dbeafe; padding:14px; font-size:.82rem; white-space:pre-wrap; }
+.mini-loader { width:26px; height:26px; border:3px solid #dbeafe; border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.product-card[data-store="co"] { outline: 1px solid rgba(202,138,4,.18); }
+.product-card[data-store="cl"] { outline: 1px solid rgba(14,116,144,.18); }
