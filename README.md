@@ -75,3 +75,11 @@ Si los placeholders de tu Chatwoot cambian, usa los equivalentes de email/contac
 - `POST /pagar` protegido.
 - `POST /chatwoot/enviar-producto` protegido.
 - `POST /chatwoot/etiquetas` protegido.
+
+
+## v6.3 UI limpia
+
+- Se eliminaron los chips morados de atributos del listado de productos.
+- Las variaciones se seleccionan con controles limpios por Color/Talla u otros atributos visibles.
+- La imagen, SKU, precio y stock cambian según la variación seleccionada.
+- Se agregó selector de tema: claro, oscuro y compacto, más color de acento.

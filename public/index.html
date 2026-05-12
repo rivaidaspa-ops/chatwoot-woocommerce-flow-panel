@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Panel Pro Chile v6 · Chatwoot App + WooCommerce + Flow</title>
+  <title>Panel Pro Chile v6.3 · Chatwoot App + WooCommerce + Flow</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -24,11 +24,12 @@
   <main id="app" class="app hidden">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Chatwoot App Panel Chile v6</p>
-        <h1>Panel interno rapido para Chatwoot con checkout chileno y variaciones visuales</h1>
+        <p class="eyebrow">Chatwoot App Panel Chile v6.3</p>
+        <h1>Panel interno rápido para Chatwoot con checkout chileno y variaciones limpias</h1>
         <p class="muted">Dockerfile listo para EasyPanel, Redis + PostgreSQL, busqueda paginada, sincronizacion en segundo plano y variaciones bajo demanda.</p>
       </div>
       <div class="top-actions">
+        <div class="theme-controls" aria-label="Preferencias de interfaz"><select id="themeMode" title="Tema"><option value="light">Tema claro</option><option value="dark">Tema oscuro</option><option value="compact">Tema compacto</option></select><select id="themeAccent" title="Color"><option value="teal">Teal</option><option value="blue">Azul</option><option value="green">Verde</option><option value="slate">Grafito</option></select></div>
         <button id="syncProductsBtn" class="secondary">Sincronizar catálogo</button><button id="refreshProductsBtn" class="secondary">Actualizar vista</button>
         <button id="clearCacheBtn" class="ghost">Limpiar caché</button>
         <button id="logoutBtn" class="ghost">Cerrar sesión</button>
@@ -80,7 +81,7 @@
     <section class="card"><h2>Pedidos</h2><div id="ordersList" class="orders-list muted">Sin pedidos cargados.</div></section>
 
     <section class="card">
-      <div class="section-title products-title"><div><h2>Productos, variaciones, atributos e imagenes</h2><p class="muted">Busqueda rapida por nombre, SKU, categoria, oferta, talla, color o atributo.</p></div></div>
+      <div class="section-title products-title"><div><h2>Productos y variaciones</h2><p class="muted">Búsqueda por nombre, SKU, categoría, oferta, talla o color. Atributos técnicos ocultos para una vista limpia.</p></div></div>
       <div class="product-toolbar">
         <input id="productFilter" placeholder="Buscar nombre, SKU, atributo o etiqueta" />
         <select id="categoryFilter"><option value="">Todas las categorías</option></select>

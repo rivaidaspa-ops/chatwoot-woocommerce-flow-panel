@@ -1,7 +1,7 @@
 {
   "name": "chatwoot-woocommerce-flow-panel",
-  "version": "1.2.2",
-  "description": "Panel Chatwoot WooCommerce Flow Chile v6.2 sin dotenv obligatorio, Dockerfile EasyPanel, paginacion Redis PostgreSQL",
+  "version": "1.2.3",
+  "description": "Panel Chatwoot WooCommerce Flow Chile v6.3 clean UI",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

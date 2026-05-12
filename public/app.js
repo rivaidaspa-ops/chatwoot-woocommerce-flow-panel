@@ -12,7 +12,9 @@ const state = {
   productLimit: 20,
   productTotal: 0,
   productLoading: false,
-  syncTimer: null
+  syncTimer: null,
+  themeMode: localStorage.getItem('panelThemeMode') || 'light',
+  themeAccent: localStorage.getItem('panelThemeAccent') || 'teal'
 };
 const $ = (id) => document.getElementById(id);
 const money = (v) => `$${Number(v || 0).toLocaleString('es-CL')} CLP`;
@@ -167,21 +169,26 @@ function variationGroups(product) {
 function productImage(product) { const v = getSelectedVariation(product); return v?.imagen || product.imagen || product.imagenes?.[0]?.src || ''; }
 function renderVariationPanel(product) {
   if (!product.variation_count && !(product.variations || []).length) return '';
-  if (!product.variations) return `<div class="variation-panel collapsed"><button class="secondary" data-load-vars="${product.id}">Ver variaciones (${product.variation_count || 0})</button><span class="muted"> Se cargan solo cuando las necesitas.</span></div>`;
+  if (!product.variations) return `<div class="variation-panel collapsed"><button class="secondary" data-load-vars="${product.id}">Elegir variación (${product.variation_count || 0})</button><span class="muted"> Color, talla e imagen se cargan solo cuando las necesitas.</span></div>`;
   const groups = variationGroups(product);
   const filtered = product.variations.filter(v => variationMatches(product, v));
-  if (!product.selectedVariationId && filtered[0]) product.selectedVariationId = filtered[0].id;
-  const current = getSelectedVariation(product);
-  const limit = product.variationLimit || 8;
-  return `<div class="variation-panel"><div class="variation-panel-title"><span>Seleccionar variacion</span><button class="tiny ghost" data-refresh-vars="${product.id}">Actualizar</button></div>${groups.map(g => `<div class="var-group"><strong>${text(g.name)}</strong><div class="var-pills"><button class="var-pill ${!(product.variationChoices||{})[g.name] ? 'active' : ''}" data-var-clear="${product.id}" data-var-name="${text(g.name)}">Todos</button>${g.options.map(o => `<button class="var-pill ${(product.variationChoices||{})[g.name] === o ? 'active' : ''}" data-var-choice="${product.id}" data-var-name="${text(g.name)}" data-var-value="${text(o)}">${text(o)}</button>`).join('')}</div></div>`).join('')}<div class="variation-cards">${filtered.slice(0, limit).map(v => `<button class="variation-card ${String(current?.id) === String(v.id) ? 'active' : ''}" data-select-var="${product.id}" data-var-id="${v.id}">${v.imagen ? `<img src="${text(v.imagen)}" loading="lazy" alt=""/>` : `<span class="var-no-img">Sin img</span>`}<span>${text(variationLabel(v))}</span><small>${text(v.sku || 'Sin SKU')} · ${money(v.precio)} · ${v.stock_status === 'instock' ? 'stock' : 'sin stock'}</small></button>`).join('')}</div>${filtered.length > limit ? `<button class="tiny secondary" data-more-vars="${product.id}">Ver mas variaciones (${filtered.length - limit})</button>` : ''}<div class="variation-summary"><strong>Seleccionada:</strong> <span>${text(current ? variationLabel(current) : 'N/D')}</span><small>${text(current?.sku || '')} · ${money(current?.precio || 0)}</small></div></div>`;
+  const current = filtered.find(v => String(v.id) === String(product.selectedVariationId)) || filtered[0] || getSelectedVariation(product);
+  if (current && String(product.selectedVariationId) !== String(current.id)) product.selectedVariationId = current.id;
+  const selectorHtml = groups.map(g => {
+    const selected = (product.variationChoices || {})[g.name] || '';
+    return `<label class="variation-field"><span>${text(g.name)}</span><select data-var-select="${product.id}" data-var-name="${text(g.name)}"><option value="">Todas las opciones</option>${g.options.map(o => `<option value="${text(o)}" ${selected === o ? 'selected' : ''}>${text(o)}</option>`).join('')}</select></label>`;
+  }).join('');
+  const image = current?.imagen || product.imagen || product.imagenes?.[0]?.src || '';
+  const attrs = current ? (current.atributos || []).filter(a => a.option && !isNoisyAttribute(a.name)).map(a => `<span>${text(a.name)}: <strong>${text(a.option)}</strong></span>`).join('') : '';
+  return `<div class="variation-panel clean"><div class="variation-panel-title"><span>Selecciona la variación</span><button class="tiny ghost" data-refresh-vars="${product.id}">Actualizar</button></div><div class="variation-selectors">${selectorHtml || '<p class="muted">Este producto no tiene atributos visibles para seleccionar.</p>'}</div>${current ? `<div class="selected-variation-card">${image ? `<img src="${text(image)}" loading="lazy" alt=""/>` : `<span class="var-no-img">Sin img</span>`}<div><strong>Variación seleccionada</strong><p>${attrs || text(variationLabel(current))}</p><small>${text(current.sku || 'Sin SKU')} · ${money(current.precio)} · ${current.stock_status === 'instock' ? 'con stock' : 'sin stock'}</small></div></div>` : '<p class="muted">Seleccione una opción para ver disponibilidad.</p>'}<p class="variation-hint">${filtered.length} variación${filtered.length === 1 ? '' : 'es'} disponible${filtered.length === 1 ? '' : 's'} con los filtros actuales.</p></div>`;
 }
 function renderProductCard(p) {
   const img = productImage(p);
-  const price = getSelectedVariation(p)?.precio || p.precio;
-  const attrs = visibleAttributes(p).map(a => `<span class="mini">${text(a.name)}: ${text((a.options || []).slice(0,6).join(', '))}</span>`).join('');
-  const tags = (p.etiquetas || []).slice(0, 4).map(t => `<span class="mini tag">${text(t)}</span>`).join('');
-  const stockOk = p.stock_status === 'instock';
-  return `<article class="product-card" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${stockOk ? 'ok' : 'no'}">${stockOk ? 'Con stock' : 'Sin stock'}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(p.sku)} · ${text(p.type)} · Stock: ${p.stock ?? 'N/D'} ${p.variation_count ? `· ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div><div class="badges">${attrs}${tags}</div>${renderVariationPanel(p)}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1"/><button data-add="${p.id}">Agregar</button><button class="secondary" data-send="${p.id}">Enviar a conversacion</button></div></div></article>`;
+  const current = getSelectedVariation(p);
+  const price = current?.precio || p.precio;
+  const stockOk = current ? current.stock_status === 'instock' : p.stock_status === 'instock';
+  const typeText = p.type === 'variable' ? 'Producto variable' : 'Producto simple';
+  return `<article class="product-card" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${stockOk ? 'ok' : 'no'}">${stockOk ? 'Con stock' : 'Sin stock'}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(current?.sku || p.sku)} · ${typeText}${p.variation_count ? ` · ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div>${renderVariationPanel(p)}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1"/><button data-add="${p.id}">Agregar</button><button class="secondary" data-send="${p.id}">Enviar a conversación</button></div></div></article>`;
 }
 function renderProducts() {
   setMetric('metricProducts', state.productos.length);
@@ -198,6 +205,7 @@ function bindProductEvents() {
   document.querySelectorAll('[data-load-vars]').forEach(btn => btn.addEventListener('click', () => loadVariations(btn.dataset.loadVars)));
   document.querySelectorAll('[data-refresh-vars]').forEach(btn => btn.addEventListener('click', () => loadVariations(btn.dataset.refreshVars, true)));
   document.querySelectorAll('[data-more-vars]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.moreVars); p.variationLimit=(p.variationLimit||8)+12; renderProducts(); }));
+  document.querySelectorAll('[data-var-select]').forEach(sel => sel.addEventListener('change', () => { const p=findProduct(sel.dataset.varSelect); p.variationChoices=p.variationChoices||{}; if (sel.value) p.variationChoices[sel.dataset.varName]=sel.value; else delete p.variationChoices[sel.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); }));
   document.querySelectorAll('[data-var-choice]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varChoice); p.variationChoices=p.variationChoices||{}; p.variationChoices[btn.dataset.varName]=btn.dataset.varValue; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); }));
   document.querySelectorAll('[data-var-clear]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varClear); p.variationChoices=p.variationChoices||{}; delete p.variationChoices[btn.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); }));
   document.querySelectorAll('[data-select-var]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.selectVar); p.selectedVariationId=btn.dataset.varId; renderProducts(); }));
@@ -294,6 +302,21 @@ function buildOrderPayload() {
 async function createOrder() { $('orderStatus').textContent=''; try { const data = await api('/crear-pedido', { method:'POST', body: JSON.stringify(buildOrderPayload()) }); state.lastOrder = data.pedido; $('orderStatus').style.color = '#15803d'; $('orderStatus').textContent = `Pedido #${data.pedido.numero} creado por ${money(data.pedido.total)}.`; await loadPanel(true); } catch(e) { $('orderStatus').style.color = '#b91c1c'; $('orderStatus').textContent = e.message; } }
 async function payOrder() { try { if (!state.lastOrder) await createOrder(); if (!state.lastOrder) return; const data = await api('/pagar', { method:'POST', body: JSON.stringify({ orderId:state.lastOrder.id, amount:state.lastOrder.total, email:$('customerEmail').value.trim(), subject:`Pedido #${state.lastOrder.numero}` }) }); window.open(data.url, '_blank', 'noopener,noreferrer'); } catch(e) { alert(e.message); } }
 async function applyLabels() { const conversationId = $('conversationId').value.trim(); const labels = $('labelInput').value.split(',').map(x=>x.trim()).filter(Boolean); if (!conversationId || !labels.length) return alert('Ingrese conversacion y etiquetas separadas por coma.'); await api('/chatwoot/etiquetas', { method:'POST', body: JSON.stringify({ conversationId, labels }) }); alert('Etiquetas aplicadas.'); }
+
+function applyThemeSettings() {
+  document.documentElement.dataset.theme = state.themeMode;
+  document.documentElement.dataset.accent = state.themeAccent;
+  if ($('themeMode')) $('themeMode').value = state.themeMode;
+  if ($('themeAccent')) $('themeAccent').value = state.themeAccent;
+}
+function updateTheme(mode, accent) {
+  state.themeMode = mode || state.themeMode || 'light';
+  state.themeAccent = accent || state.themeAccent || 'teal';
+  localStorage.setItem('panelThemeMode', state.themeMode);
+  localStorage.setItem('panelThemeAccent', state.themeAccent);
+  applyThemeSettings();
+}
+
 async function clearCache() { localStorage.removeItem('regionesChileV6'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/regiones'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('logoutBtn').addEventListener('click', ()=>{ localStorage.removeItem('panelAuth'); localStorage.removeItem('panelToken'); state.auth=''; state.panelToken=''; showLogin(); });
@@ -311,4 +334,7 @@ $('billingRegion').addEventListener('change', () => renderComunas($('billingRegi
 $('billingComuna').addEventListener('change', updatePostcode);
 $('billingRut').addEventListener('input', updateRutStatus);
 $('applyLabelsBtn').addEventListener('click', applyLabels);
+$('themeMode')?.addEventListener('change', () => updateTheme($('themeMode').value, $('themeAccent')?.value));
+$('themeAccent')?.addEventListener('change', () => updateTheme($('themeMode')?.value, $('themeAccent').value));
+applyThemeSettings();
 testAuth();
