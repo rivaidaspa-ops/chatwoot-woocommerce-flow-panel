@@ -166,7 +166,7 @@ let dbReady = false;
 let redisReady = false;
 let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
 const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.6.0';
+const APP_VERSION = '8.6.1';
 const appLogs = [];
 function addLog(level, message, data = {}) {
   const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
@@ -861,6 +861,11 @@ async function callAiRecommendations(provider, payload, baseRecommendations) {
 app.get('/flow/retorno', (req, res) => res.sendFile(path.join(__dirname, 'public', 'flow-retorno.html')));
 app.post('/flow/confirmacion', (req, res) => res.status(200).send('OK'));
 
+// Servir la interfaz y sus assets antes de proteger las APIs.
+// El panel se sigue autenticando para llamadas API con token o Basic Auth,
+// pero CSS/JS ya no quedan bloqueados cuando se abre con ?panel_token=...
+app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
+
 app.use(authMiddleware);
 
 app.get('/admin/settings', async (req, res) => {
@@ -896,8 +901,6 @@ app.get('/diagnostics/status', async (req, res) => {
   res.json({ ok:true, app_name:APP_NAME, version:APP_VERSION, active_default:currentDefaultStore(), redis:redisReady, postgres:dbReady, cache_items:memoryCache.size, sync:syncJob, stores, chatwoot:{ configured:Boolean((getCfg('CHATWOOT_URL') || '').trim() && (getCfg('CHATWOOT_API_KEY') || '').trim() && (getCfg('CHATWOOT_ACCOUNT_ID') || '').trim()), url:getCfg('CHATWOOT_URL') || '' }, logs:appLogs.slice(0,80) });
 });
 app.get('/diagnostics/logs', (req, res) => res.json({ ok:true, logs:appLogs.slice(0,200) }));
-
-app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
 
 app.get('/stores', (req,res)=>res.json({ stores:listStores(), default_store:currentDefaultStore() }));
 app.get('/paises', (req,res)=>res.json({ stores:listStores(), default_store:currentDefaultStore() }));
@@ -1560,5 +1563,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v8.4 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v8.6.1 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

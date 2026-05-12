@@ -1,6 +1,6 @@
 {
   "name": "rivaida-commerce-hub",
-  "version": "8.5.0",
+  "version": "8.6.1",
   "description": "Rivaida Commerce Hub - Chatwoot, WooCommerce, Chile y Colombia sin cruce de tiendas",
   "main": "server.js",
   "type": "commonjs",

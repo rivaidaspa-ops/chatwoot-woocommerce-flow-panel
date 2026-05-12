@@ -1,4 +1,4 @@
-// v8.6 Rivaida Commerce Hub: aislamiento tienda, selector pais, diagnosticos y Chatwoot estable.
+// v8.6.1 Rivaida Commerce Hub: carga estable de productos, assets publicos y stock visible por defecto.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -330,7 +330,7 @@ async function changeStore(storeId) {
   if ($('billingRegion')) $('billingRegion').innerHTML = '<option value="">Cargando...</option>';
   if ($('billingComuna')) $('billingComuna').innerHTML = '<option value="">Seleccione primero</option>';
   if ($('billingPostcode')) $('billingPostcode').value = '';
-  if ($('stockFilter')) $('stockFilter').value = 'instock';
+  if ($('stockFilter')) $('stockFilter').value = '';
   applyStoreUI(); renderCart(); renderOrders([]); if ($('productsList')) $('productsList').innerHTML = `<div class="store-switch-state"><strong>${text(currentStore().name || state.activeStore)}</strong><p>Cargando catálogo separado para esta tienda...</p></div>`;
   if (!isStoreEnabled(state.activeStore)) {
     const st = currentStore();
@@ -597,7 +597,7 @@ function closeVariationModal() {
   state.variationModalProductId = null;
 }
 function renderProducts() {
-  document.body.classList.toggle('show-all-stock', ($('stockFilter')?.value || 'instock') !== 'instock');
+  document.body.classList.toggle('show-all-stock', ($('stockFilter')?.value || '') !== 'instock');
   setMetric('metricProducts', state.productos.length);
   const vCount = state.productos.reduce((s,p)=>s+Number(p.variation_count || (p.variations||[]).length || 0),0);
   setMetric('metricVariations', vCount);
@@ -680,19 +680,20 @@ function buildProductSearchParams(offset=0) {
   params.set('q', $('productFilter')?.value?.trim() || '');
   params.set('category', $('categoryFilter')?.value || '');
   params.set('sale', $('saleFilter')?.checked ? 'true' : 'false');
-  params.set('stock', $('stockFilter')?.value || 'instock');
+  params.set('stock', $('stockFilter')?.value || '');
   params.set('limit', String(state.productLimit));
   params.set('offset', String(offset));
   return params.toString();
 }
 async function loadProducts(force=false, append=false) {
-  const expectedStore = state.activeStore;
+  let expectedStore = state.activeStore;
   if (state.productLoading) return;
   if (!isStoreEnabled(state.activeStore)) {
     const fallback = firstEnabledStoreId();
     if (fallback && fallback !== state.activeStore) {
       notifyWarning('Tienda sin credenciales', `Cambiando a ${state.stores.find(s=>s.id===fallback)?.name || fallback}.`);
       state.activeStore = fallback; localStorage.setItem('activeStore', fallback);
+      expectedStore = fallback;
       const sel = $('storeSelect'); if (sel) sel.value = fallback;
       applyStoreUI();
     } else {
