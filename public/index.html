@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="es-CL">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Panel Cliente WooCommerce + Chatwoot + Flow</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main id="loginScreen" class="login-screen">
+      <section class="login-card">
+        <div class="brand-dot"></div>
+        <h1>Panel seguro</h1>
+        <p>Ingrese sus credenciales para ver clientes, pedidos y productos.</p>
+        <form id="loginForm">
+          <label>Usuario<input id="loginUser" autocomplete="username" required /></label>
+          <label>Contraseña<input id="loginPassword" type="password" autocomplete="current-password" required /></label>
+          <button type="submit">Ingresar</button>
+          <small id="loginError"></small>
+        </form>
+      </section>
+    </main>
+
+    <main id="app" class="app hidden">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Chatwoot App Panel</p>
+          <h1>Cliente, pedidos, productos y pagos Flow</h1>
+        </div>
+        <button id="logoutBtn" class="ghost">Cerrar sesión</button>
+      </header>
+
+      <section class="search-card">
+        <div>
+          <label>Email del cliente</label>
+          <input id="customerEmail" placeholder="cliente@correo.cl" />
+        </div>
+        <div>
+          <label>ID conversación Chatwoot</label>
+          <input id="conversationId" placeholder="{{conversation.id}}" />
+        </div>
+        <button id="loadBtn">Cargar panel</button>
+      </section>
+
+      <section class="grid two">
+        <article class="card" id="clientCard">
+          <h2>Cliente</h2>
+          <div id="clientInfo" class="muted">Ingrese un email para cargar información.</div>
+        </article>
+
+        <article class="card">
+          <h2>Crear pedido</h2>
+          <div class="checkout-grid">
+            <input id="billingFirstName" placeholder="Nombre" />
+            <input id="billingLastName" placeholder="Apellido" />
+            <input id="billingPhone" placeholder="Teléfono +56" />
+            <input id="billingAddress" placeholder="Dirección" />
+            <input id="billingCity" placeholder="Comuna / ciudad" />
+            <input id="billingRegion" placeholder="Región" />
+            <select id="paymentMethod">
+              <option value="flow">Flow - Webpay / Multicaja</option>
+              <option value="bacs">Transferencia bancaria</option>
+              <option value="cod">Pago contra entrega</option>
+            </select>
+          </div>
+          <div id="cartBox" class="cart-box muted">Seleccione productos para el pedido.</div>
+          <div class="actions">
+            <button id="createOrderBtn">Crear pedido</button>
+            <button id="payBtn" class="secondary">Generar pago Flow</button>
+          </div>
+          <p id="orderStatus" class="status-text"></p>
+        </article>
+      </section>
+
+      <section class="card">
+        <h2>Pedidos</h2>
+        <div id="ordersList" class="orders-list muted">Sin pedidos cargados.</div>
+      </section>
+
+      <section class="card">
+        <div class="section-title">
+          <h2>Productos</h2>
+          <input id="productFilter" placeholder="Buscar producto o SKU" />
+        </div>
+        <div id="productsList" class="products-list muted">Sin productos cargados.</div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
