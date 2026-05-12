@@ -1,4 +1,4 @@
-// v8.6.4 Rivaida Commerce Hub: productos Colombia, stock correcto e imagen Chatwoot normalizada para compartir como adjunto.
+// v8.6.6 Rivaida Commerce Hub: productos Colombia aislados, cache no-store y Chatwoot sin dependencia sharp.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -153,6 +153,17 @@ app.use(helmet({ contentSecurityPolicy: false, frameguard: false }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('combined'));
+
+// Evita respuestas 304/caché viejo en catálogo, diagnóstico y archivos principales.
+app.use((req, res, next) => {
+  if (req.path.startsWith('/productos') || req.path.startsWith('/categorias') || req.path.startsWith('/stores') || req.path.startsWith('/admin/settings') || req.path.startsWith('/diagnostics') || req.path === '/app.js' || req.path === '/styles.css' || req.path === '/') {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+  }
+  next();
+});
 app.use(cors({
   origin(origin, cb) {
     if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) return cb(null, true);
@@ -170,7 +181,7 @@ let dbReady = false;
 let redisReady = false;
 let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
 const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.6.4';
+const APP_VERSION = '8.6.6';
 const appLogs = [];
 function addLog(level, message, data = {}) {
   const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
@@ -1469,7 +1480,7 @@ async function prepareChatwootImageAttachment(img, store = null) {
     maxContentLength: fetchMaxBytes,
     maxBodyLength: fetchMaxBytes,
     headers: {
-      'User-Agent': 'Rivaida-Commerce-Hub/8.6.4 (+https://app.rivaida.cl)',
+      'User-Agent': 'Rivaida-Commerce-Hub/8.6.6 (+https://app.rivaida.cl)',
       'Accept': 'image/avif,image/webp,image/jpeg,image/png,image/*,*/*;q=0.5',
       'Referer': store?.wc_url || getCfg('PUBLIC_BASE_URL', '') || undefined
     },
@@ -1504,7 +1515,7 @@ async function prepareChatwootImageAttachment(img, store = null) {
     buffer = converted;
     mime = 'image/jpeg';
   } else if (!supportedDirect) {
-    throw new Error(`Formato ${mime} no compatible para adjuntar. Instale/active sharp para convertirlo a JPG.`);
+    throw new Error(`Formato ${mime} no compatible para adjuntar como archivo. Se envia URL de respaldo.`);
   }
 
   if (buffer.length > outputMaxBytes) throw new Error(`Imagen demasiado pesada despues de normalizar (${buffer.length} bytes).`);

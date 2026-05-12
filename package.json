@@ -1,7 +1,7 @@
 {
   "name": "rivaida-commerce-hub",
-  "version": "8.6.4",
-  "description": "Rivaida Commerce Hub - Chatwoot, WooCommerce, imagenes adjuntas normalizadas para WhatsApp",
+  "version": "8.6.6",
+  "description": "Rivaida Commerce Hub - fix real despliegue, productos Colombia aislados y Chatwoot sin sharp",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -16,8 +16,7 @@
     "morgan": "^1.10.0",
     "ioredis": "^5.4.2",
     "pg": "^8.13.1",
-    "form-data": "^4.0.1",
-    "sharp": "^0.33.5"
+    "form-data": "^4.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.9"

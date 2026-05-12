@@ -1,4 +1,4 @@
-// v8.6.4 Rivaida Commerce Hub: productos Colombia, tienda automatica, stock correcto e imagen Chatwoot normalizada.
+// v8.6.6 Rivaida Commerce Hub: productos Colombia aislados, tienda automática y cache limpio.
 function normalizeStoreId(value='') { const raw = String(value || '').trim().toLowerCase(); if (raw === 'co' || raw === 'colombia') return 'co'; if (raw === 'cl' || raw === 'chile') return 'cl'; return raw; }
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
@@ -78,22 +78,24 @@ function extractEmailFromString(value='') {
   const match = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return match ? match[0].toLowerCase() : '';
 }
-function isValidEmailLocal(value='') { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim()); }
+function isTemplateValue(value='') { return /\{\{|\}\}|%7B%7B|%7D%7D/i.test(String(value || '')); }
+function cleanUrlValue(value='') { const v = String(value || '').trim(); return isTemplateValue(v) ? '' : v; }
+function isValidEmailLocal(value='') { const v = cleanUrlValue(value); return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v); }
 function extractChatwootContext(payload = {}) {
   const appContext = payload.event === 'appContext' ? payload.data : (payload.appContext || payload.data || payload);
   const conversation = appContext.conversation || appContext.currentConversation || appContext;
   const contact = appContext.contact || conversation.contact || conversation.meta?.sender || conversation.sender || appContext.meta?.sender || {};
   const inboxId = conversation.inbox_id || conversation.inbox?.id || appContext.inbox_id || appContext.inbox?.id || conversation.meta?.inbox_id || conversation.meta?.inbox?.id || conversation.additional_attributes?.inbox_id || '';
-  const conversationId = conversation.id || conversation.conversation_id || appContext.conversation_id || appContext.id || '';
-  let email = contact.email || conversation.meta?.sender?.email || conversation.contact_email || appContext.email || '';
+  const conversationId = cleanUrlValue(conversation.id || conversation.conversation_id || appContext.conversation_id || appContext.id || '');
+  let email = cleanUrlValue(contact.email || conversation.meta?.sender?.email || conversation.contact_email || appContext.email || '');
   if (!email) {
     for (const msg of conversation.messages || []) {
-      email = msg.sender?.email || extractEmailFromString(msg.content || msg.processed_message_content || '');
+      email = cleanUrlValue(msg.sender?.email || extractEmailFromString(msg.content || msg.processed_message_content || ''));
       if (email) break;
     }
   }
   const name = contact.name || contact.available_name || conversation.meta?.sender?.name || '';
-  const phone = contact.phone_number || contact.phone || conversation.meta?.sender?.phone_number || appContext.phone || '';
+  const phone = cleanUrlValue(contact.phone_number || contact.phone || conversation.meta?.sender?.phone_number || appContext.phone || '');
   const labels = conversation.labels || conversation.label_list || [];
   const customAttributes = conversation.custom_attributes || contact.custom_attributes || {};
   return { raw: payload, appContext, conversation, contact, conversationId, inboxId, email, name, phone, labels, customAttributes };
@@ -207,10 +209,10 @@ function readUrlParams() {
   const p = new URLSearchParams(location.search);
   const token = p.get('panel_token') || p.get('token') || '';
   if (token) { state.panelToken = token; localStorage.setItem('panelToken', token); }
-  const email = p.get('email') || p.get('email_cliente') || p.get('customer_email') || p.get('contact_email') || '';
-  const conversationId = p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '';
-  const phone = p.get('phone') || p.get('phone_number') || p.get('telefono') || p.get('whatsapp') || '';
-  const inboxId = p.get('inbox_id') || p.get('inboxId') || p.get('inbox.id') || '';
+  const email = cleanUrlValue(p.get('email') || p.get('email_cliente') || p.get('customer_email') || p.get('contact_email') || '');
+  const conversationId = cleanUrlValue(p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '');
+  const phone = cleanUrlValue(p.get('phone') || p.get('phone_number') || p.get('telefono') || p.get('whatsapp') || '');
+  const inboxId = cleanUrlValue(p.get('inbox_id') || p.get('inboxId') || p.get('inbox.id') || '');
   const explicitStore = p.get('store') || p.get('country') || p.get('rivaida_store') || '';
   const labels = (p.get('labels') || p.get('tags') || '').split(',').map(x => x.trim()).filter(Boolean);
   if (email && $('customerEmail')) $('customerEmail').value = email;
@@ -748,7 +750,7 @@ async function loadProducts(force=false, append=false) {
   if (!append) { showProductLoader(true, force ? 'Actualizando vista...' : 'Buscando productos...'); $('productsList').innerHTML = '<div class="skeleton-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div>'; }
   setLoadingState(force ? 'Actualizando' : 'Buscando', 'Cargando catálogo rápido...');
   try {
-    const endpoint = `/productos/search?${buildProductSearchParams(nextOffset)}${force ? '&refresh=true' : ''}`;
+    const endpoint = `/productos/search?${buildProductSearchParams(nextOffset)}${force ? '&refresh=true' : ''}&_=${Date.now()}`;
     const data = await api(endpoint);
     if (expectedStore !== state.activeStore) { pushUiLog('warning','Catálogo descartado por cambio de tienda', `${expectedStore} → ${state.activeStore}`); return; }
     if (data.store && data.store !== state.activeStore) { notifyWarning('Catálogo descartado', `El servidor respondió ${data.store}, pero la tienda activa es ${state.activeStore}.`); return; }
