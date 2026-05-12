@@ -1,4 +1,4 @@
-// v7.6: Colombia pagos Wompi/Bold/COD, copia rapida Dropi y venta desde Chatwoot.
+// v7.7: Metodos de pago y envio automaticos desde WooCommerce + credenciales desde interfaz.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -26,7 +26,7 @@ function parseJsonEnv(name, fallback) { try { return process.env[name] ? JSON.pa
 
 function defaultPaymentPresets(storeId = 'co') {
   if (storeId !== 'co') return [];
-  const configured = parseJsonEnv('CO_PAYMENT_METHOD_PRESETS_JSON', null);
+  const configured = parseJsonEnv('CO_PAYMENT_METHOD_PRESETS_JSON','CL_DEFAULT_SHIPPING_METHOD_ID','CL_DEFAULT_SHIPPING_METHOD_TITLE','CO_DEFAULT_SHIPPING_METHOD_ID','CO_DEFAULT_SHIPPING_METHOD_TITLE', null);
   if (Array.isArray(configured) && configured.length) return configured;
   return [
     { id: getCfg('CO_COD_GATEWAY_ID', 'cod'), title: getCfg('CO_COD_GATEWAY_TITLE', 'Contra entrega'), kind: 'cash_on_delivery', requires_link: false, recommended: true },
@@ -51,6 +51,44 @@ function mergePaymentMethods(wooMethods = [], store) {
     else map.set(id, { id, title: p.title || id, description: p.description || 'Método sugerido para Colombia. Debe existir/estar activo en WooCommerce para generar links de pago.', enabled: true, preset: true, source: 'preset', kind: p.kind || 'manual', requires_link: Boolean(p.requires_link) });
   }
   return Array.from(map.values());
+}
+
+
+function shippingMethodCost(settings = {}) {
+  const candidates = [settings?.cost?.value, settings?.min_amount?.value, settings?.flat_rate_cost?.value];
+  for (const raw of candidates) {
+    if (raw === undefined || raw === null || raw === '') continue;
+    const n = Number(String(raw).replace(/[^0-9.,-]/g, '').replace(',', '.'));
+    if (!Number.isNaN(n)) return n;
+  }
+  return 0;
+}
+function normalizeShippingMethod(method = {}, zone = {}) {
+  const settings = method.settings || {};
+  const title = method.title || settings?.title?.value || method.method_title || method.method_id || 'Metodo de envio';
+  return {
+    id: String(method.id || method.instance_id || method.method_id || '').trim(),
+    instance_id: method.instance_id || method.id || null,
+    method_id: method.method_id || method.id || '',
+    title,
+    method_title: method.method_title || title,
+    enabled: method.enabled !== false,
+    zone_id: zone.id ?? null,
+    zone_name: zone.name || 'General',
+    total: shippingMethodCost(settings),
+    settings: {
+      title: settings?.title?.value || title,
+      cost: settings?.cost?.value || '',
+      min_amount: settings?.min_amount?.value || ''
+    },
+    source: 'woocommerce'
+  };
+}
+function defaultShippingFallback(store) {
+  const st = resolveStore(store?.id || store);
+  const id = st.country === 'CO' ? getCfg('CO_DEFAULT_SHIPPING_METHOD_ID','flat_rate') : getCfg('CL_DEFAULT_SHIPPING_METHOD_ID','flat_rate');
+  const title = st.country === 'CO' ? getCfg('CO_DEFAULT_SHIPPING_METHOD_TITLE','Envio Colombia') : getCfg('CL_DEFAULT_SHIPPING_METHOD_TITLE','Despacho a domicilio');
+  return [{ id, instance_id:null, method_id:id, title, method_title:title, enabled:true, zone_id:null, zone_name:'Configuracion local', total:0, preset:true, source:'fallback' }];
 }
 
 function getCfg(key, fallback = '') { return process.env[key] !== undefined && process.env[key] !== '' ? process.env[key] : fallback; }
@@ -309,7 +347,7 @@ const CONFIG_KEYS = [
   'PUBLIC_BASE_URL','ALLOWED_ORIGINS','PANEL_APP_TOKEN','DEFAULT_STORE',
   'WC_URL','WC_KEY','WC_SECRET','WOO_FLOW_GATEWAY_ID','WOO_FLOW_GATEWAY_TITLE',
   'CO_WC_URL','CO_WC_KEY','CO_WC_SECRET','CO_STORE_NAME','CO_WOO_PAYMENT_GATEWAY_ID','CO_WOO_PAYMENT_GATEWAY_TITLE',
-  'CO_COD_GATEWAY_ID','CO_COD_GATEWAY_TITLE','CO_WOMPI_GATEWAY_ID','CO_WOMPI_GATEWAY_TITLE','CO_BOLD_GATEWAY_ID','CO_BOLD_GATEWAY_TITLE','CO_PSE_GATEWAY_ID','CO_PSE_GATEWAY_TITLE','CO_MERCADO_PAGO_GATEWAY_ID','CO_MERCADO_PAGO_GATEWAY_TITLE','CO_EPAYCO_GATEWAY_ID','CO_EPAYCO_GATEWAY_TITLE','CO_PAYU_GATEWAY_ID','CO_PAYU_GATEWAY_TITLE','CO_BANK_TRANSFER_GATEWAY_ID','CO_BANK_TRANSFER_GATEWAY_TITLE','CO_PAYMENT_METHOD_PRESETS_JSON',
+  'CO_COD_GATEWAY_ID','CO_COD_GATEWAY_TITLE','CO_WOMPI_GATEWAY_ID','CO_WOMPI_GATEWAY_TITLE','CO_BOLD_GATEWAY_ID','CO_BOLD_GATEWAY_TITLE','CO_PSE_GATEWAY_ID','CO_PSE_GATEWAY_TITLE','CO_MERCADO_PAGO_GATEWAY_ID','CO_MERCADO_PAGO_GATEWAY_TITLE','CO_EPAYCO_GATEWAY_ID','CO_EPAYCO_GATEWAY_TITLE','CO_PAYU_GATEWAY_ID','CO_PAYU_GATEWAY_TITLE','CO_BANK_TRANSFER_GATEWAY_ID','CO_BANK_TRANSFER_GATEWAY_TITLE','CO_PAYMENT_METHOD_PRESETS_JSON','CL_DEFAULT_SHIPPING_METHOD_ID','CL_DEFAULT_SHIPPING_METHOD_TITLE','CO_DEFAULT_SHIPPING_METHOD_ID','CO_DEFAULT_SHIPPING_METHOD_TITLE',
   'CHATWOOT_URL','CHATWOOT_API_KEY','CHATWOOT_ACCOUNT_ID',
   'PAYMENT_LINK_PROVIDER','FLOW_API_URL','FLOW_API_KEY','FLOW_SECRET_KEY','FLOW_URL_CONFIRMATION','FLOW_URL_RETURN','AI_RECOMMENDATION_WEBHOOK_URL',
   'CACHE_TTL_SECONDS','PRODUCT_PAGE_SIZE','MAX_PAGE_SIZE','SYNC_PER_PAGE','VARIATION_CACHE_SECONDS','CHATWOOT_SEND_IMAGE_ATTACHMENT'
@@ -662,7 +700,7 @@ app.post('/admin/settings', async (req, res, next) => {
     for (const [key, value] of Object.entries(settings)) if (CONFIG_KEYS.includes(key)) process.env[key] = String(value ?? '');
     rebuildRuntimeConfig();
     await saveAppSettingsToDb(settings);
-    await cacheDelPrefix('productos:'); await cacheDelPrefix('cliente:'); await cacheDelPrefix('payment_methods:');
+    await cacheDelPrefix('productos:'); await cacheDelPrefix('cliente:'); await cacheDelPrefix('payment_methods:'); await cacheDelPrefix('shipping_methods:');
     res.json({ ok:true, message:'Configuracion guardada', stores:listStores(), saved_keys:Object.keys(settings).filter(k=>CONFIG_KEYS.includes(k)) });
   } catch (error) { next(error); }
 });
@@ -779,6 +817,41 @@ app.get('/payment-methods', async (req, res, next) => {
       return mergePaymentMethods(wooMethods, st);
     }, req.query.refresh === 'true');
     res.json({ store:st.id, country:st.country, methods:result.value, cached:result.cached, note: st.country === 'CO' ? 'Incluye metodos activos de WooCommerce mas sugeridos Colombia (Wompi, Bold, contra entrega, PSE, PayU, ePayco, Mercado Pago).' : '' });
+  } catch (error) { next(error); }
+});
+
+
+app.get('/shipping-methods', async (req, res, next) => {
+  try {
+    const st = storeFromReq(req);
+    const result = await remember(`shipping_methods:${st.id}:wc`, 3600, async () => {
+      const wc = wcForStore(st);
+      const methods = [];
+      try {
+        const { data: zones } = await wc.get('/shipping/zones');
+        const zoneList = Array.isArray(zones) ? zones : [];
+        for (const zone of zoneList) {
+          try {
+            const { data: zoneMethods } = await wc.get(`/shipping/zones/${zone.id}/methods`);
+            for (const m of (zoneMethods || [])) if (m.enabled !== false) methods.push(normalizeShippingMethod(m, zone));
+          } catch (e) { console.warn('[shipping zone methods]', zone?.id, e.response?.data || e.message); }
+        }
+      } catch (e) { console.warn('[shipping zones]', e.response?.data || e.message); }
+      try {
+        const { data: restOfWorld } = await wc.get('/shipping/zones/0/methods');
+        for (const m of (restOfWorld || [])) if (m.enabled !== false) methods.push(normalizeShippingMethod(m, { id:0, name:'Resto del mundo' }));
+      } catch (e) { /* algunos Woo no exponen zona 0 */ }
+      const unique = [];
+      const seen = new Set();
+      for (const m of methods) {
+        const key = `${m.method_id}:${m.instance_id}:${m.title}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(m);
+      }
+      return unique.length ? unique : defaultShippingFallback(st);
+    }, req.query.refresh === 'true');
+    res.json({ store: st.id, country: st.country, methods: result.value, cached: result.cached, note: 'Metodos de envio activos leidos desde zonas de envio WooCommerce.' });
   } catch (error) { next(error); }
 });
 
@@ -930,8 +1003,7 @@ function buildPlatformSalePayload(body = {}, store = resolveStore(DEFAULT_STORE)
 }
 function platformPayloadToText(payload = {}) {
   const c = payload.customer || {};
-  const products = (payload.products || []).map((p) => `- ${p.quantity}x ${p.name}${p.variation ? ` (${p.variation})` : ''} | SKU ${p.sku || 'N/D'} | ${p.price || 0}`).join('
-');
+  const products = (payload.products || []).map((p) => `- ${p.quantity}x ${p.name}${p.variation ? ` (${p.variation})` : ''} | SKU ${p.sku || 'N/D'} | ${p.price || 0}`).join('\n');
   return [
     `PLATAFORMA: ${payload.platform || ''}`,
     `PAIS: ${payload.country || ''}`,
@@ -948,8 +1020,7 @@ function platformPayloadToText(payload = {}) {
     'PRODUCTOS:',
     products || '- Sin productos',
     payload.note ? `NOTA: ${payload.note}` : ''
-  ].filter(Boolean).join('
-');
+  ].filter(Boolean).join('\n');
 }
 app.post('/platform/export-sale', async (req, res, next) => {
   try {

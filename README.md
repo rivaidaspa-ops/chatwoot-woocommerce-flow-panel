@@ -88,3 +88,10 @@ Si tus plugins usan otros IDs, ajustalos en Credenciales dentro del panel.
 - Se corrigió filtro de ofertas usando `on_sale` y `sale_price` de WooCommerce.
 - El estado visual ya no muestra nombres técnicos de base de datos; usa loader y estados amigables.
 - Venta rápida Colombia/Dropi: copia datos del chat, cliente, dirección, productos, pago y total para pegar en plataforma externa.
+
+
+## v7.7 - Pagos y envios Woo automaticos
+
+Esta version lee desde WooCommerce los metodos de pago activos y tambien los metodos de envio activos configurados en las zonas de envio. En el checkout del panel el agente selecciona metodo de pago y metodo de envio; al crear el pedido se envia `shipping_lines` a WooCommerce.
+
+Las credenciales ya no necesitan editarse en `.env`: entra al panel, abre **Credenciales**, guarda Woo Chile, Woo Colombia, Chatwoot y Flow. El `.env` queda solo para arrancar el servicio, dominio, Redis/PostgreSQL y usuario del panel.

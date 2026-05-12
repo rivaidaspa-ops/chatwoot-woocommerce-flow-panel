@@ -9,6 +9,7 @@ const state = {
   regiones: [],
   categorias: [],
   paymentMethods: [],
+  shippingMethods: [],
   selectedOrder: null,
   cart: [],
   lastOrder: null,
@@ -166,6 +167,7 @@ async function enterApp() {
   await loadRegiones();
   await loadCategorias();
   await loadPaymentMethods();
+  await loadShippingMethods();
   readUrlParams();
   installChatwootContextListener();
   autoRequestChatwootContext();
@@ -199,7 +201,7 @@ function applyStoreUI() {
 async function changeStore(storeId) {
   state.activeStore = storeId || 'cl'; localStorage.setItem('activeStore', state.activeStore);
   state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null;
-  applyStoreUI(); await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); renderCart(); renderOrders([]); await loadProducts(true);
+  applyStoreUI(); await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); renderCart(); renderOrders([]); await loadProducts(true);
 }
 async function loadRegiones(force=false) {
   const key = `regiones_${state.activeStore}_v74`;
@@ -232,6 +234,39 @@ async function loadPaymentMethods(force=false) {
   } catch (e) {
     console.warn('No se pudieron cargar métodos Woo:', e.message);
   }
+}
+
+async function loadShippingMethods(force=false) {
+  try {
+    const data = await api(`/shipping-methods${force ? '?refresh=true' : ''}`);
+    state.shippingMethods = data.methods || [];
+    const sel = $('shippingMethod');
+    if (sel) {
+      if (state.shippingMethods.length) {
+        sel.innerHTML = state.shippingMethods.map((m) => {
+          const label = `${m.title || m.method_title || m.id}${m.zone_name ? ' · ' + m.zone_name : ''}${Number(m.total || 0) ? ' · ' + money(m.total) : ''}`;
+          return `<option value="${text(m.id || m.method_id)}" data-method-id="${text(m.method_id || m.id)}" data-instance-id="${text(m.instance_id || '')}" data-title="${text(m.title || m.method_title || '')}" data-total="${text(m.total || 0)}">${text(label)}</option>`;
+        }).join('');
+      } else {
+        sel.innerHTML = '<option value="">Sin método de envío</option>';
+      }
+    }
+  } catch (e) {
+    console.warn('No se pudieron cargar métodos de envío Woo:', e.message);
+    const sel = $('shippingMethod');
+    if (sel) sel.innerHTML = '<option value="">Envío no configurado</option>';
+  }
+}
+function selectedShippingLine() {
+  const sel = $('shippingMethod');
+  if (!sel || !sel.value) return null;
+  const opt = sel.selectedOptions?.[0];
+  if (!opt) return null;
+  return {
+    method_id: opt.dataset.methodId || sel.value,
+    method_title: opt.dataset.title || opt.textContent || sel.value,
+    total: String(Number(opt.dataset.total || 0))
+  };
 }
 function renderRegionOptions() {
   if (!$('billingRegion')) return;
@@ -517,6 +552,7 @@ function buildOrderPayload() {
     shipping: { ...billing },
     payment_method:$('paymentMethod').value,
     payment_method_title:$('paymentMethod').selectedOptions[0]?.textContent || $('paymentMethod').value,
+    shipping_lines: selectedShippingLine() ? [selectedShippingLine()] : [],
     line_items: state.cart.map(i => ({ product_id:i.product.id, variation_id:i.variation?.id, quantity:i.quantity })),
     customer_note:$('customerNote').value.trim() || 'Pedido creado desde panel Chatwoot.',
     meta_data:[{key:'_chatwoot_conversation_id', value:$('conversationId').value.trim()}]
@@ -558,6 +594,7 @@ function buildPlatformPayloadLocal() {
       country: payload.billing.country
     },
     payment: { method_id: payload.payment_method, method_title: payload.payment_method_title, mode: payload.payment_method === 'cod' ? 'contra_entrega' : 'online_o_manual' },
+    shipping: selectedShippingLine(),
     products,
     total,
     note: payload.customer_note
@@ -565,10 +602,8 @@ function buildPlatformPayloadLocal() {
 }
 function platformPayloadToTextLocal(payload) {
   const c = payload.customer || {};
-  const products = (payload.products || []).map(p => `- ${p.quantity}x ${p.name}${p.variation ? ` (${p.variation})` : ''} | SKU ${p.sku || 'N/D'} | ${p.price}`).join('
-');
-  return [`PLATAFORMA: ${payload.platform}`,`PAIS: ${payload.country}`,`NOMBRE: ${c.full_name}`,`DOCUMENTO: ${c.document}`,`TELEFONO: ${c.phone_number}`,`EMAIL: ${c.email}`,`DIRECCION: ${c.address} ${c.address_2 || ''}`.trim(),`CIUDAD: ${c.city}`,`DEPARTAMENTO/REGION: ${c.state}`,`CODIGO POSTAL: ${c.postal_code}`,`METODO PAGO: ${payload.payment?.method_title || payload.payment?.method_id}`,`TOTAL: ${payload.total} ${payload.currency}`,'PRODUCTOS:',products || '- Sin productos',payload.note ? `NOTA: ${payload.note}` : ''].filter(Boolean).join('
-');
+  const products = (payload.products || []).map(p => `- ${p.quantity}x ${p.name}${p.variation ? ` (${p.variation})` : ''} | SKU ${p.sku || 'N/D'} | ${p.price}`).join('\n');
+  return [`PLATAFORMA: ${payload.platform}`,`PAIS: ${payload.country}`,`NOMBRE: ${c.full_name}`,`DOCUMENTO: ${c.document}`,`TELEFONO: ${c.phone_number}`,`EMAIL: ${c.email}`,`DIRECCION: ${c.address} ${c.address_2 || ''}`.trim(),`CIUDAD: ${c.city}`,`DEPARTAMENTO/REGION: ${c.state}`,`CODIGO POSTAL: ${c.postal_code}`,`METODO PAGO: ${payload.payment?.method_title || payload.payment?.method_id}`, payload.shipping ? `ENVIO: ${payload.shipping.method_title || payload.shipping.method_id} ${payload.shipping.total ? '(' + payload.shipping.total + ')' : ''}` : '',`TOTAL: ${payload.total} ${payload.currency}`,'PRODUCTOS:',products || '- Sin productos',payload.note ? `NOTA: ${payload.note}` : ''].filter(Boolean).join('\n');
 }
 async function copyPlatformData(format='text') {
   try {
@@ -864,6 +899,7 @@ async function saveSettings() {
   await loadRegiones(true);
   await loadCategorias(true);
   await loadPaymentMethods(true);
+  await loadShippingMethods(true);
   alert('Credenciales guardadas. Si cambiaste dominio o CORS, ejecuta Deploy/Restart en EasyPanel para asegurar proxy y caché limpios.');
 }
 async function testSettings(target, store='') {

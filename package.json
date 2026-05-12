@@ -1,7 +1,7 @@
 {
   "name": "chatwoot-woocommerce-flow-panel",
-  "version": "1.7.6",
-  "description": "Panel Chatwoot WooCommerce multi-pais v7.5 con credenciales en interfaz e imagen adjunta WhatsApp/Chatwoot",
+  "version": "1.7.7",
+  "description": "Panel Chatwoot WooCommerce multi-pais v7.7 con credenciales en interfaz y metodos de pago/envio Woo automaticos",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
