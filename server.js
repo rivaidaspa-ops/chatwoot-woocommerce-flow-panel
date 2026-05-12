@@ -8,6 +8,8 @@ const axios = require('axios');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const Redis = require('ioredis');
+const { Pool } = require('pg');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -112,19 +114,96 @@ const regiones = regionesBase.map((r) => ({
 const comunaRegionMap = new Map();
 for (const region of regiones) for (const c of region.comunas) comunaRegionMap.set(normalizeText(c.comuna), { codigo: region.codigo, region: region.region });
 const memoryCache = new Map();
+const REDIS_URL = process.env.REDIS_URL || '';
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const redis = REDIS_URL ? new Redis(REDIS_URL, { maxRetriesPerRequest: 1, lazyConnect: true }) : null;
+const pgPool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, max: Number(process.env.PG_POOL_MAX || 5) }) : null;
+let dbReady = false;
+if (redis) redis.connect().then(() => console.log('[Redis] conectado')).catch((e) => console.warn('[Redis] no conectado:', e.message));
 const CACHE_TTL_PRODUCTS = Number(process.env.CACHE_TTL_PRODUCTS_MS || 300000);
 const CACHE_TTL_CLIENTE = Number(process.env.CACHE_TTL_CLIENTE_MS || 60000);
-function cacheGet(key) {
+
+async function cacheGet(key) {
+  if (redis) {
+    try { const raw = await redis.get(key); if (raw) return JSON.parse(raw); } catch (e) { console.warn('[Redis get]', e.message); }
+  }
   const item = memoryCache.get(key);
   if (!item || item.expiresAt < Date.now()) { memoryCache.delete(key); return null; }
   return item.value;
 }
-function cacheSet(key, value, ttlMs) { memoryCache.set(key, { value, expiresAt: Date.now() + ttlMs, createdAt: Date.now() }); return value; }
+async function cacheSet(key, value, ttlMs) {
+  if (redis) {
+    try { await redis.set(key, JSON.stringify(value), 'PX', ttlMs); } catch (e) { console.warn('[Redis set]', e.message); }
+  }
+  memoryCache.set(key, { value, expiresAt: Date.now() + ttlMs, createdAt: Date.now() });
+  return value;
+}
+async function cacheDelPrefix(prefix) {
+  for (const key of Array.from(memoryCache.keys())) if (key.startsWith(prefix)) memoryCache.delete(key);
+  if (redis) {
+    try {
+      let cursor = '0';
+      do {
+        const [next, keys] = await redis.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 100);
+        cursor = next;
+        if (keys.length) await redis.del(keys);
+      } while (cursor !== '0');
+    } catch (e) { console.warn('[Redis del]', e.message); }
+  }
+}
 async function remember(key, ttlMs, factory, force = false) {
-  if (!force) { const cached = cacheGet(key); if (cached) return { value: cached, cached: true }; }
+  if (!force) { const cached = await cacheGet(key); if (cached) return { value: cached, cached: true }; }
   const value = await factory();
-  cacheSet(key, value, ttlMs);
+  await cacheSet(key, value, ttlMs);
   return { value, cached: false };
+}
+async function initDb() {
+  if (!pgPool) return false;
+  try {
+    await pgPool.query(`CREATE TABLE IF NOT EXISTS product_index (
+      id BIGINT PRIMARY KEY,
+      type TEXT, nombre TEXT, sku TEXT, precio NUMERIC, precio_regular NUMERIC, precio_oferta NUMERIC,
+      stock INTEGER, stock_status TEXT, imagen TEXT, permalink TEXT,
+      categorias TEXT[], etiquetas TEXT[], search_text TEXT, payload JSONB NOT NULL,
+      updated_at TIMESTAMPTZ DEFAULT now()
+    )`);
+    await pgPool.query('CREATE INDEX IF NOT EXISTS idx_product_index_search ON product_index USING gin(to_tsvector(\'simple\', search_text))');
+    await pgPool.query('CREATE INDEX IF NOT EXISTS idx_product_index_sku ON product_index (sku)');
+    await pgPool.query('CREATE INDEX IF NOT EXISTS idx_product_index_categories ON product_index USING gin(categorias)');
+    dbReady = true;
+    console.log('[Postgres] índice de productos listo');
+    return true;
+  } catch (e) { console.warn('[Postgres] no disponible:', e.message); return false; }
+}
+initDb();
+async function upsertProductsIndex(products=[]) {
+  if (!pgPool || !dbReady) return;
+  const client = await pgPool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const p of products) {
+      const variationText = (p.variations || []).map(v => [v.sku, ...(v.atributos || []).map(a => `${a.name} ${a.option}`)].join(' ')).join(' ');
+      const searchText = normalizeText([p.nombre, p.sku, ...(p.categorias || []), ...(p.etiquetas || []), ...(p.atributos || []).map(a => `${a.name} ${(a.options || []).join(' ')}`), variationText].flat().join(' '));
+      await client.query(`INSERT INTO product_index (id,type,nombre,sku,precio,precio_regular,precio_oferta,stock,stock_status,imagen,permalink,categorias,etiquetas,search_text,payload,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
+        ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type,nombre=EXCLUDED.nombre,sku=EXCLUDED.sku,precio=EXCLUDED.precio,precio_regular=EXCLUDED.precio_regular,precio_oferta=EXCLUDED.precio_oferta,stock=EXCLUDED.stock,stock_status=EXCLUDED.stock_status,imagen=EXCLUDED.imagen,permalink=EXCLUDED.permalink,categorias=EXCLUDED.categorias,etiquetas=EXCLUDED.etiquetas,search_text=EXCLUDED.search_text,payload=EXCLUDED.payload,updated_at=now()`,
+        [p.id,p.type,p.nombre,p.sku,Number(p.precio||0),Number(p.precio_regular||0),Number(p.precio_oferta||0),p.stock,p.stock_status,p.imagen,p.permalink,p.categorias||[],p.etiquetas||[],searchText,JSON.stringify(p)]);
+    }
+    await client.query('COMMIT');
+  } catch (e) { await client.query('ROLLBACK'); console.warn('[Postgres upsert]', e.message); }
+  finally { client.release(); }
+}
+async function searchProductsIndex({ q='', category='', sale=false, stock='', limit=60, offset=0 } = {}) {
+  if (!pgPool || !dbReady) return null;
+  const clauses=[]; const values=[];
+  if (q) { values.push(`%${normalizeText(q)}%`); clauses.push(`search_text ILIKE $${values.length}`); }
+  if (category) { values.push(category); clauses.push(`$${values.length} = ANY(categorias)`); }
+  if (sale) clauses.push(`COALESCE(precio_oferta,0) > 0`);
+  if (stock === 'instock') clauses.push(`stock_status = 'instock'`);
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  values.push(Number(limit)); const limitIdx=values.length; values.push(Number(offset)); const offsetIdx=values.length;
+  const { rows } = await pgPool.query(`SELECT payload, count(*) OVER() AS total FROM product_index ${where} ORDER BY updated_at DESC, nombre ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values);
+  return { productos: rows.map(r => r.payload), total: Number(rows[0]?.total || 0), source: 'postgres' };
 }
 
 
@@ -277,11 +356,11 @@ function normalizeCheckout(body) {
   };
 }
 
-app.get('/health', (req, res) => res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-pro-v2', cache_items: memoryCache.size }));
+app.get('/health', (req, res) => res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-pro-v4', cache_items: memoryCache.size, redis: Boolean(redis), postgres: Boolean(pgPool), dbReady }));
 app.get('/comunas', (req, res) => res.json({ comunas }));
 app.get('/regiones', (req, res) => res.json({ regiones }));
 app.get('/cache/status', (req, res) => res.json({ ok: true, items: memoryCache.size, keys: Array.from(memoryCache.keys()) }));
-app.post('/cache/clear', (req, res) => { memoryCache.clear(); res.json({ ok: true, message: 'Cache limpiado' }); });
+app.post('/cache/clear', async (req, res) => { memoryCache.clear(); await cacheDelPrefix('productos'); await cacheDelPrefix('cliente'); res.json({ ok: true, message: 'Cache limpiado' }); });
 app.get('/validar-rut', (req, res) => res.json({ rut: formatRut(req.query.rut || ''), valido: validateRut(req.query.rut || '') }));
 
 app.get('/cliente', async (req, res, next) => {
@@ -318,21 +397,76 @@ app.get('/cliente', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+
+async function buildProductsCatalog(includeVariations=true) {
+  const products = await getAllProducts();
+  const normalized = [];
+  const concurrency = Number(process.env.VARIATION_CONCURRENCY || 4);
+  let idx = 0;
+  async function worker() {
+    while (idx < products.length) {
+      const p = products[idx++];
+      const variations = includeVariations && p.type === 'variable' ? await getVariations(p.id) : [];
+      normalized.push(normalizeProduct(p, variations));
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  normalized.sort((a,b) => String(a.nombre).localeCompare(String(b.nombre), 'es'));
+  await upsertProductsIndex(normalized);
+  return normalized;
+}
+function filterProductsLocal(products, { q='', category='', sale=false, stock='', limit=60, offset=0 } = {}) {
+  const nq = normalizeText(q);
+  let filtered = products.filter(p => {
+    if (category && !(p.categorias || []).includes(category)) return false;
+    if (sale && !Number(p.precio_oferta || 0)) return false;
+    if (stock === 'instock' && p.stock_status !== 'instock') return false;
+    if (!nq) return true;
+    const hay = normalizeText([p.nombre,p.sku,...(p.categorias||[]),...(p.etiquetas||[]),(p.variations||[]).map(v => `${v.sku} ${(v.atributos||[]).map(a=>`${a.name} ${a.option}`).join(' ')}`).join(' ')].join(' '));
+    return hay.includes(nq);
+  });
+  const total = filtered.length;
+  return { productos: filtered.slice(Number(offset), Number(offset)+Number(limit)), total, source: 'memory' };
+}
+
 app.get('/productos', async (req, res, next) => {
   try {
     const includeVariations = req.query.variations !== 'false';
     const force = req.query.refresh === 'true';
     const cacheKey = `productos:${includeVariations ? 'with-variations' : 'simple'}`;
-    const result = await remember(cacheKey, CACHE_TTL_PRODUCTS, async () => {
-      const products = await getAllProducts();
-      const normalized = [];
-      for (const p of products) {
-        const variations = includeVariations && p.type === 'variable' ? await getVariations(p.id) : [];
-        normalized.push(normalizeProduct(p, variations));
-      }
-      return normalized;
-    }, force);
-    res.json({ productos: result.value, cached: result.cached, cache_ttl_ms: CACHE_TTL_PRODUCTS });
+    const result = await remember(cacheKey, CACHE_TTL_PRODUCTS, () => buildProductsCatalog(includeVariations), force);
+    res.json({ productos: result.value, cached: result.cached, cache_ttl_ms: CACHE_TTL_PRODUCTS, total: result.value.length, redis: Boolean(redis), postgres: Boolean(pgPool), dbReady });
+  } catch (error) { next(error); }
+});
+
+app.get('/productos/search', async (req, res, next) => {
+  try {
+    const params = { q: String(req.query.q || '').trim(), category: String(req.query.category || '').trim(), sale: req.query.sale === 'true', stock: String(req.query.stock || ''), limit: Math.min(Number(req.query.limit || 60), 120), offset: Number(req.query.offset || 0) };
+    let result = await searchProductsIndex(params);
+    let cached = false;
+    if (!result) {
+      const catalog = await remember('productos:with-variations', CACHE_TTL_PRODUCTS, () => buildProductsCatalog(true), false);
+      cached = catalog.cached;
+      result = filterProductsLocal(catalog.value, params);
+    }
+    res.json({ ...result, cached, limit: params.limit, offset: params.offset });
+  } catch (error) { next(error); }
+});
+
+app.post('/productos/sync', async (req, res, next) => {
+  try {
+    await cacheDelPrefix('productos');
+    const productos = await buildProductsCatalog(true);
+    await cacheSet('productos:with-variations', productos, CACHE_TTL_PRODUCTS);
+    res.json({ ok: true, total: productos.length, message: 'Productos sincronizados en caché e índice local' });
+  } catch (error) { next(error); }
+});
+
+app.get('/categorias', async (req, res, next) => {
+  try {
+    const cached = await remember('productos:with-variations', CACHE_TTL_PRODUCTS, () => buildProductsCatalog(true), false);
+    const categorias = [...new Set(cached.value.flatMap(p => p.categorias || []))].sort((a,b)=>a.localeCompare(b,'es'));
+    res.json({ categorias, cached: cached.cached });
   } catch (error) { next(error); }
 });
 

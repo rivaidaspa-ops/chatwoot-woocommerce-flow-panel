@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Panel Pro Chile v2 · WooCommerce + Chatwoot + Flow</title>
+  <title>Panel Pro Chile v4 · WooCommerce + Chatwoot + Flow</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -24,12 +24,12 @@
   <main id="app" class="app hidden">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Chatwoot App Panel Chile v2</p>
-        <h1>Checkout chileno, RUT, regiones, comunas, variaciones y caché</h1>
-        <p class="muted">Memoria en servidor + navegador para cargar más rápido productos, regiones y comunas.</p>
+        <p class="eyebrow">Chatwoot App Panel Chile v4</p>
+        <h1>Checkout chileno, búsqueda rápida, Redis/Postgres, variaciones y caché</h1>
+        <p class="muted">Redis + PostgreSQL opcional para indexar productos y acelerar búsqueda por SKU, nombre, categoría y ofertas.</p>
       </div>
       <div class="top-actions">
-        <button id="refreshProductsBtn" class="secondary">Refrescar productos</button>
+        <button id="syncProductsBtn" class="secondary">Sincronizar catálogo</button><button id="refreshProductsBtn" class="secondary">Refrescar búsqueda</button>
         <button id="clearCacheBtn" class="ghost">Limpiar caché</button>
         <button id="logoutBtn" class="ghost">Cerrar sesión</button>
       </div>
@@ -80,8 +80,16 @@
     <section class="card"><h2>Pedidos</h2><div id="ordersList" class="orders-list muted">Sin pedidos cargados.</div></section>
 
     <section class="card">
-      <div class="section-title products-title"><div><h2>Productos, variaciones, atributos e imágenes</h2><p class="muted">Busca por nombre, SKU, atributo, etiqueta, talla, color o dato AliDropship.</p></div><input id="productFilter" placeholder="Buscar nombre, SKU, atributo o etiqueta" /></div>
+      <div class="section-title products-title"><div><h2>Productos, variaciones, atributos e imágenes</h2><p class="muted">Búsqueda rápida por nombre, SKU, categoría, oferta, talla, color o atributo.</p></div></div>
+      <div class="product-toolbar">
+        <input id="productFilter" placeholder="Buscar nombre, SKU, atributo o etiqueta" />
+        <select id="categoryFilter"><option value="">Todas las categorías</option></select>
+        <label class="check-inline"><input id="saleFilter" type="checkbox" /> Solo ofertas</label>
+        <select id="stockFilter"><option value="">Todo stock</option><option value="instock">Solo con stock</option></select>
+      </div>
+      <div id="loadingOverlay" class="loading-overlay hidden"><div class="spinner"></div><strong>Cargando productos...</strong><span id="loadingDetail">Preparando búsqueda rápida</span></div>
       <div id="productsList" class="products-list muted">Sin productos cargados.</div>
+      <div class="load-more-row"><button id="loadMoreBtn" class="secondary hidden">Cargar más productos</button></div>
     </section>
   </main>
   <script src="app.js"></script>

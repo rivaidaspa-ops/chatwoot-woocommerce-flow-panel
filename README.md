@@ -1,100 +1,99 @@
-# Chatwoot WooCommerce Flow Panel Pro Chile
+# Chatwoot WooCommerce Flow Panel Pro Chile v4
 
-Panel Node.js + Express protegido con Basic Auth y login visual. Integra WooCommerce, Flow, Chatwoot, RUT chileno, selector Región → Comuna, códigos postales de Chile, productos variables con atributos/variaciones y caché de memoria para acelerar carga.
+Panel Node.js + Express protegido con Basic Auth y login visual. Integra WooCommerce, Flow, Chatwoot, RUT chileno, Región → Comuna, códigos postales, productos variables, imágenes de variación, Redis y PostgreSQL opcionales para acelerar tiendas grandes.
 
-## Mejoras incluidas
+## Mejoras v4
 
-- Muestra productos simples y variables.
-- Carga variaciones WooCommerce con SKU, precio, stock, atributos e imagen.
-- Muestra atributos, categorías, etiquetas e imágenes del producto.
-- Checkout chileno con RUT obligatorio, selector Región → Comuna y código postal automático.
-- Usa comunas desde `data/starter-comunas-chile.csv` y regiones desde `data/regiones-comunas-chile.json`.
-- Guarda RUT y comuna como `meta_data` en el pedido WooCommerce.
-- Compatible con productos importados por AliDropship: expone metadatos relevantes `ali`, `alids`, `alidropship`, tracking y supplier cuando WooCommerce los devuelve por REST API.
-- Botón para enviar producto o variación a conversación Chatwoot.
-- Endpoint para aplicar etiquetas a conversaciones Chatwoot.
-- Pago Flow en CLP.
-- Caché en memoria para productos y cliente: `CACHE_TTL_PRODUCTS_MS` y `CACHE_TTL_CLIENTE_MS`.
-- Caché local en navegador para regiones/comunas y productos recientes.
-- Botones para refrescar productos y limpiar caché desde la interfaz.
+- Redis opcional para caché rápido de productos/clientes.
+- PostgreSQL opcional para índice local de productos.
+- Búsqueda rápida por nombre, SKU, variación, atributo, etiqueta y categoría.
+- Filtro por categoría.
+- Filtro “Solo ofertas”.
+- Filtro “Solo con stock”.
+- Carga paginada: no renderiza todo de una sola vez.
+- Botón “Cargar más productos”.
+- Botón “Sincronizar catálogo” para traer WooCommerce, guardar caché e indexar.
+- Loader visual circular mientras carga.
+- Mantiene RUT, comunas, códigos postales, Flow, Chatwoot y variaciones.
 
-## Variables de entorno EasyPanel
-
-Copia `.env.example` y cambia los valores reales.
+## Variables de entorno
 
 ```env
 PORT=3000
 PUBLIC_BASE_URL=https://panel.tudominio.cl
+ALLOWED_ORIGINS=
+
 PANEL_USER=admin
 PANEL_PASSWORD=admin123
+
 WC_URL=https://tutienda.cl
 WC_KEY=ck_xxxxxxxxxxxxxxxxx
 WC_SECRET=cs_xxxxxxxxxxxxxxxxx
+
 FLOW_API_URL=https://sandbox.flow.cl/api
 FLOW_API_KEY=xxxxxxxxxxxxxxxxx
 FLOW_SECRET_KEY=xxxxxxxxxxxxxxxxx
+FLOW_PAYMENT_METHOD=9
+FLOW_URL_CONFIRMATION=https://panel.tudominio.cl/flow/confirmacion
+FLOW_URL_RETURN=https://panel.tudominio.cl/flow/retorno
+
 CHATWOOT_URL=https://chat.tudominio.cl
 CHATWOOT_API_KEY=xxxxxxxxxxxxxxxxx
 CHATWOOT_ACCOUNT_ID=1
+
 REQUIRE_RUT=true
 DEFAULT_POSTCODE=8320000
+CACHE_TTL_PRODUCTS_MS=900000
+CACHE_TTL_CLIENTE_MS=60000
+
+# Recomendado para velocidad
+REDIS_URL=redis://redis:6379
+DATABASE_URL=postgresql://panel_user:panel_password@postgres:5432/chatwoot_panel
+PG_POOL_MAX=5
+VARIATION_CONCURRENCY=4
 ```
 
-## EasyPanel
+## EasyPanel recomendado
 
-- Builder: Nixpacks
-- Install command: `npm install`
-- Build command: vacío
-- Start command: `node server.js`
-- Port: `3000`
+1. Mantén tu app Node con Nixpacks.
+2. Crea un servicio Redis.
+3. Crea un servicio PostgreSQL.
+4. Copia las URLs internas de Redis y PostgreSQL a las variables `REDIS_URL` y `DATABASE_URL`.
+5. En la app usa:
+   - Install command: `npm install`
+   - Build command: vacío
+   - Start command: `node server.js`
+   - Port: `3000`
+
+Si no configuras Redis/PostgreSQL, la app funciona igual usando memoria interna, pero la búsqueda será menos rápida cuando WooCommerce tenga muchos productos.
+
+## Flujo recomendado tras desplegar
+
+1. Entra al panel.
+2. Presiona “Sincronizar catálogo”.
+3. Espera a que termine la primera carga.
+4. Luego las búsquedas por nombre/SKU/categoría/oferta serán mucho más rápidas.
 
 ## Chatwoot App Panel
 
-Registra la URL:
+Registra:
 
 ```text
 https://panel.tudominio.cl/?email={{contact.email}}&conversation_id={{conversation.id}}
-```
-
-También soporta:
-
-```text
-/cliente?email={{email_cliente}}
 ```
 
 ## Endpoints principales
 
 - `GET /cliente?email=cliente@correo.cl`
 - `GET /productos`
+- `GET /productos/search?q=sku-o-nombre&category=Zapatos&sale=true&stock=instock`
+- `POST /productos/sync`
+- `GET /categorias`
+- `GET /regiones`
 - `GET /comunas`
-- `GET /validar-rut?rut=12345678-5`
 - `POST /crear-pedido`
 - `POST /pagar`
 - `POST /chatwoot/enviar-producto`
 - `POST /chatwoot/etiquetas`
 
 Todos los endpoints están protegidos por Basic Auth.
-
-
-## Actualización v2
-
-Esta versión agrega:
-
-- Memoria/caché en backend para productos y clientes.
-- Caché en navegador para acelerar la apertura del panel.
-- Endpoint `/regiones` con regiones de Chile y comunas dependientes.
-- Selector de región y selector de comuna dependiente.
-- Código postal automático al elegir comuna.
-- Validación visual de RUT antes de crear pedido.
-- Métricas superiores: productos, variaciones, pedidos y estado de caché.
-- Botón “Refrescar productos” para forzar lectura nueva desde WooCommerce.
-- Botón “Limpiar caché” para borrar caché servidor + navegador.
-
-## Variables nuevas opcionales
-
-```env
-CACHE_TTL_PRODUCTS_MS=300000
-CACHE_TTL_CLIENTE_MS=60000
-```
-
-Si WooCommerce tiene muchos productos variables, sube `CACHE_TTL_PRODUCTS_MS` a `600000` o `900000` para mejorar velocidad.

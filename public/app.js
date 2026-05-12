@@ -1,6 +1,6 @@
 const state = {
   auth: localStorage.getItem('panelAuth') || '', cliente: null, pedidos: [], productos: [], regiones: [], cart: [], lastOrder: null,
-  productsLoadedAt: 0
+  productsLoadedAt: 0, productOffset: 0, productLimit: 30, productTotal: 0, productLoading: false, categorias: []
 };
 const $ = (id) => document.getElementById(id);
 const money = (v) => `$${Number(v || 0).toLocaleString('es-CL')} CLP`;
@@ -15,10 +15,11 @@ async function api(path, options = {}) {
 }
 function showApp() { $('loginScreen').classList.add('hidden'); $('app').classList.remove('hidden'); }
 function showLogin() { $('loginScreen').classList.remove('hidden'); $('app').classList.add('hidden'); }
-function setLoading(message) { $('metricCache').textContent = message; }
+function setLoading(message, detail='') { $('metricCache').textContent = message; const d=$('loadingDetail'); if (d && detail) d.textContent = detail; }
+function showProductLoader(show=true, detail='Cargando productos...') { const el=$('loadingOverlay'); if (!el) return; el.classList.toggle('hidden', !show); if (detail) $('loadingDetail').textContent=detail; }
 function saveLocal(key, value) { localStorage.setItem(key, JSON.stringify({ value, time: Date.now() })); }
 function readLocal(key, maxAgeMs) { try { const raw = JSON.parse(localStorage.getItem(key) || 'null'); if (!raw || Date.now() - raw.time > maxAgeMs) return null; return raw.value; } catch { return null; } }
-async function testAuth() { try { await api('/health'); showApp(); await loadRegiones(); readChatwootParams(); } catch { localStorage.removeItem('panelAuth'); state.auth = ''; showLogin(); } }
+async function testAuth() { try { await api('/health'); showApp(); await loadRegiones(); await loadCategorias(); readChatwootParams(); await loadProducts(false); } catch { localStorage.removeItem('panelAuth'); state.auth = ''; showLogin(); } }
 function readChatwootParams() {
   const p = new URLSearchParams(location.search);
   const email = p.get('email') || p.get('email_cliente') || p.get('customer_email') || '';
@@ -35,6 +36,16 @@ async function loadRegiones(force=false) {
   saveLocal('regionesChileV2', state.regiones);
   renderRegionOptions();
 }
+
+async function loadCategorias(force=false) {
+  try {
+    const data = await api('/categorias');
+    state.categorias = data.categorias || [];
+    const sel = $('categoryFilter');
+    if (sel) sel.innerHTML = '<option value="">Todas las categorías</option>' + state.categorias.map(c => `<option value="${text(c)}">${text(c)}</option>`).join('');
+  } catch (e) { console.warn(e.message); }
+}
+
 function renderRegionOptions() {
   $('billingRegion').innerHTML = '<option value="">Seleccione región</option>' + state.regiones.map(r => `<option value="${text(r.codigo)}">${text(r.region)}</option>`).join('');
 }
@@ -113,25 +124,28 @@ function updateVariationPreview(productId) {
 }
 function productSearchString(p) { return normalize([p.nombre,p.sku,(p.etiquetas||[]).join(' '),(p.categorias||[]).join(' '),(p.atributos||[]).map(a=>`${a.name} ${(a.options||[]).join(' ')}`).join(' '),(p.variations||[]).map(v=>`${v.sku} ${variationLabel(v)}`).join(' '),JSON.stringify(p.meta||{})].join(' ')); }
 function selectedVariation(product) { const id = $(`var-${product.id}`)?.value || ''; return (product.variations || []).find(v => String(v.id) === String(id)) || null; }
-function renderProducts() {
-  const q = normalize($('productFilter').value.trim());
-  const filtered = state.productos.filter(p => !q || productSearchString(p).includes(q));
+
+function renderProducts(append=false) {
+  const filtered = state.productos;
   const variationCount = state.productos.reduce((s,p)=>s+(p.variations||[]).length,0);
-  $('metricProducts').textContent = state.productos.length;
+  $('metricProducts').textContent = state.productTotal || state.productos.length;
   $('metricVariations').textContent = variationCount;
-  if (!filtered.length) { $('productsList').innerHTML = '<span class="muted">No hay productos disponibles.</span>'; return; }
-  $('productsList').innerHTML = filtered.map(p => {
+  $('loadMoreBtn')?.classList.toggle('hidden', state.productos.length >= state.productTotal || !state.productTotal);
+  if (!filtered.length && !append) { $('productsList').innerHTML = '<span class="muted">No hay productos disponibles para la búsqueda.</span>'; return; }
+  const html = filtered.map(p => {
     const variations = p.variations || [];
     const defaultVariation = variations[0] || null;
     const attrBadges = visibleAttributes(p).map(a => `<span class="mini">${text(a.name)}: ${text((a.options||[]).join(', '))}</span>`).join('');
     const tagBadges = (p.etiquetas || []).slice(0,4).map(t => `<span class="mini tag">${text(t)}</span>`).join('');
+    const cats = (p.categorias || []).slice(0,3).map(c => `<span class="mini ali">${text(c)}</span>`).join('');
     const mainImage = variationImage(p, defaultVariation);
     const thumbs = [p.imagen, ...(p.imagenes || []).map(i=>i.src), ...variations.map(v=>v.imagen)].filter(Boolean);
     const uniqueThumbs = [...new Set(thumbs)].slice(0,5).map(src => `<button class="thumb" type="button" data-thumb="${p.id}" data-src="${text(src)}"><img src="${text(src)}" alt="${text(p.nombre)}" loading="lazy"></button>`).join('');
     const imageBlock = mainImage ? `<div class="main-product-image"><img id="main-img-${p.id}" src="${text(mainImage)}" alt="${text(p.nombre)}" loading="lazy"></div><div class="thumb-row">${uniqueThumbs}</div>` : '<div class="no-img">Sin imagen</div>';
     const varSelect = variations.length ? `<label class="variation-box"><span>Seleccionar variación</span><select id="var-${p.id}" class="variation-select" data-product-id="${p.id}">${variations.map(v => `<option value="${v.id}">${text(formatVariationOption(v))}</option>`).join('')}</select><small id="selected-${p.id}" class="selected-variation">${text(defaultVariation ? variationLabel(defaultVariation) : '')}</small></label>` : '<p class="muted">Producto simple</p>';
-    return `<article class="product-card"><div class="gallery">${imageBlock}</div><div><div class="product-head"><div><h3>${text(p.nombre)}</h3><p id="meta-${p.id}" class="muted">SKU: ${text(defaultVariation?.sku || p.sku)} · Stock: ${text(defaultVariation?.stock ?? p.stock ?? p.stock_status)} · ${variations.length ? 'Producto variable' : 'Producto simple'}</p></div><span id="price-${p.id}" class="price">${money(defaultVariation?.precio || p.precio)}</span></div><div class="badges">${attrBadges}${tagBadges}</div>${varSelect}<div class="product-actions"><input id="qty-${p.id}" class="qty" type="number" min="1" value="1"><button data-add="${p.id}">Agregar</button><button class="secondary" data-send="${p.id}">Enviar a conversación</button></div></div></article>`;
+    return `<article class="product-card"><div class="gallery">${imageBlock}</div><div><div class="product-head"><div><h3>${text(p.nombre)}</h3><p id="meta-${p.id}" class="muted">SKU: ${text(defaultVariation?.sku || p.sku)} · Stock: ${text(defaultVariation?.stock ?? p.stock ?? p.stock_status)} · ${variations.length ? 'Producto variable' : 'Producto simple'}</p></div><span id="price-${p.id}" class="price">${money(defaultVariation?.precio || p.precio)}</span></div><div class="badges">${cats}${attrBadges}${tagBadges}</div>${varSelect}<div class="product-actions"><input id="qty-${p.id}" class="qty" type="number" min="1" value="1"><button data-add="${p.id}">Agregar</button><button class="secondary" data-send="${p.id}">Enviar a conversación</button></div></div></article>`;
   }).join('');
+  $('productsList').innerHTML = html;
   document.querySelectorAll('.variation-select').forEach(sel => sel.addEventListener('change', () => updateVariationPreview(sel.dataset.productId)));
   document.querySelectorAll('[data-thumb]').forEach(btn => btn.addEventListener('click', () => { const img = $(`main-img-${btn.dataset.thumb}`); if (img) img.src = btn.dataset.src; }));
   document.querySelectorAll('[data-add]').forEach(btn => btn.addEventListener('click', () => { const p = state.productos.find(x => String(x.id) === btn.dataset.add); addToCart(p, Math.max(1, Number($(`qty-${p.id}`).value || 1)), selectedVariation(p)); }));
@@ -148,15 +162,49 @@ async function sendToConversation(product, quantity, variation=null) {
   const conversationId = $('conversationId').value.trim(); if (!conversationId) return alert('Ingrese ID conversación Chatwoot.');
   await api('/chatwoot/enviar-producto', { method:'POST', body: JSON.stringify({ conversationId, product, variation, quantity }) }); alert('Producto enviado a la conversación.');
 }
-async function loadProducts(force=false) {
-  setLoading(force ? 'Actualizando' : 'Cargando');
-  const local = !force && readLocal('productosV2', 180000);
-  if (local) { state.productos = local; renderProducts(); setLoading('Navegador'); return; }
-  const data = await api(`/productos${force ? '?refresh=true' : ''}`);
-  state.productos = data.productos || [];
-  saveLocal('productosV2', state.productos);
-  renderProducts(); setLoading(data.cached ? 'Servidor' : 'Nuevo');
+
+function buildProductSearchParams(offset=0) {
+  const params = new URLSearchParams();
+  params.set('q', $('productFilter')?.value?.trim() || '');
+  params.set('category', $('categoryFilter')?.value || '');
+  params.set('sale', $('saleFilter')?.checked ? 'true' : 'false');
+  params.set('stock', $('stockFilter')?.value || '');
+  params.set('limit', String(state.productLimit));
+  params.set('offset', String(offset));
+  return params.toString();
 }
+async function loadProducts(force=false, append=false) {
+  if (state.productLoading) return;
+  state.productLoading = true;
+  const nextOffset = append ? state.productOffset : 0;
+  if (!append) showProductLoader(true, force ? 'Actualizando catálogo...' : 'Buscando productos...');
+  setLoading(force ? 'Actualizando' : 'Buscando', 'Consultando índice rápido');
+  try {
+    const endpoint = force && !append ? `/productos/search?${buildProductSearchParams(0)}&refresh=true` : `/productos/search?${buildProductSearchParams(nextOffset)}`;
+    const data = await api(endpoint);
+    const incoming = data.productos || [];
+    state.productos = append ? [...state.productos, ...incoming] : incoming;
+    state.productTotal = data.total || state.productos.length;
+    state.productOffset = state.productos.length;
+    renderProducts(append);
+    setLoading(data.source === 'postgres' ? 'Postgres' : (data.cached ? 'Cache' : 'WooCommerce'), `${state.productos.length}/${state.productTotal} productos`);
+  } catch (e) { alert(e.message); }
+  finally { state.productLoading = false; showProductLoader(false); }
+}
+async function syncProducts() {
+  if (!confirm('Esto sincronizará productos y variaciones desde WooCommerce. Puede tardar la primera vez.')) return;
+  showProductLoader(true, 'Sincronizando WooCommerce con caché e índice local...');
+  $('syncProductsBtn')?.classList.add('syncing');
+  try {
+    const data = await api('/productos/sync', { method:'POST', body:'{}' });
+    alert(`Sincronización lista: ${data.total} productos.`);
+    await loadCategorias(true);
+    await loadProducts(false);
+  } catch (e) { alert(e.message); }
+  finally { $('syncProductsBtn')?.classList.remove('syncing'); showProductLoader(false); }
+}
+let productSearchTimer;
+function scheduleProductSearch() { clearTimeout(productSearchTimer); productSearchTimer = setTimeout(() => loadProducts(false), 350); }
 async function loadPanel(force=false) {
   const email = $('customerEmail').value.trim(); if (!email) return alert('Ingrese email del cliente.');
   $('loadBtn').disabled = true;
@@ -179,12 +227,17 @@ async function createOrder() { $('orderStatus').textContent=''; try { const data
 async function payOrder() { try { if (!state.lastOrder) await createOrder(); if (!state.lastOrder) return; const data = await api('/pagar', { method:'POST', body: JSON.stringify({ orderId:state.lastOrder.id, amount:state.lastOrder.total, email:$('customerEmail').value.trim(), subject:`Pedido #${state.lastOrder.numero}` }) }); window.open(data.url, '_blank', 'noopener,noreferrer'); } catch(e) { alert(e.message); } }
 async function applyLabels() { const conversationId = $('conversationId').value.trim(); const labels = $('labelInput').value.split(',').map(x=>x.trim()).filter(Boolean); if (!conversationId || !labels.length) return alert('Ingrese conversación y etiquetas separadas por coma.'); await api('/chatwoot/etiquetas', { method:'POST', body: JSON.stringify({ conversationId, labels }) }); alert('Etiquetas aplicadas.'); }
 async function clearCache() { localStorage.removeItem('productosV2'); localStorage.removeItem('regionesChileV2'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoading('Limpio'); alert('Caché limpiado.'); }
-$('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); try { await api('/health'); localStorage.setItem('panelAuth', state.auth); showApp(); await loadRegiones(); readChatwootParams(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
+$('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); try { await api('/health'); localStorage.setItem('panelAuth', state.auth); showApp(); await loadRegiones(); await loadCategorias(); readChatwootParams(); await loadProducts(false); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('logoutBtn').addEventListener('click', ()=>{ localStorage.removeItem('panelAuth'); state.auth=''; showLogin(); });
 $('loadBtn').addEventListener('click', () => loadPanel(false));
 $('refreshProductsBtn').addEventListener('click', () => loadProducts(true));
+$('syncProductsBtn')?.addEventListener('click', syncProducts);
+$('loadMoreBtn')?.addEventListener('click', () => loadProducts(false, true));
 $('clearCacheBtn').addEventListener('click', clearCache);
-$('productFilter').addEventListener('input', renderProducts);
+$('productFilter').addEventListener('input', scheduleProductSearch);
+$('categoryFilter')?.addEventListener('change', () => loadProducts(false));
+$('saleFilter')?.addEventListener('change', () => loadProducts(false));
+$('stockFilter')?.addEventListener('change', () => loadProducts(false));
 $('createOrderBtn').addEventListener('click', createOrder); $('payBtn').addEventListener('click', payOrder);
 $('billingRegion').addEventListener('change', () => renderComunas($('billingRegion').value));
 $('billingComuna').addEventListener('change', updatePostcode);
