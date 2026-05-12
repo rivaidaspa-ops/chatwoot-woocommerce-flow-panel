@@ -1,0 +1,1 @@
+v8.6.10: corrige error columna moneda no existe eliminando dependencia SQL de moneda/currency en product_index. Mantiene Chile cl y Colombia co. No cambia Docker ni dependencias.

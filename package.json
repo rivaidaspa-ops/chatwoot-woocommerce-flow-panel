@@ -1,7 +1,7 @@
 {
   "name": "rivaida-commerce-hub",
-  "version": "8.6.9",
-  "description": "Rivaida Commerce Hub - migracion robusta product_index, aislamiento Chile/Colombia y debug seguro",
+  "version": "8.6.10",
+  "description": "Rivaida Commerce Hub - fix conservador DB sin dependencia de columna moneda",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

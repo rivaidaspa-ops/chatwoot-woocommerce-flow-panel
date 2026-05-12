@@ -1,4 +1,4 @@
-// v8.6.9 Rivaida Commerce Hub: migracion robusta product_index, aislamiento Chile/Colombia y debug seguro.
+// v8.6.10 Rivaida Commerce Hub: fix conservador DB sin dependencia de columna moneda/currency.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -186,7 +186,7 @@ let dbReady = false;
 let redisReady = false;
 let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
 const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.6.9';
+const APP_VERSION = '8.6.10';
 const appLogs = [];
 function addLog(level, message, data = {}) {
   const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
@@ -480,19 +480,12 @@ async function initDb() {
       store_id TEXT NOT NULL DEFAULT 'cl',
       id BIGINT NOT NULL,
       type TEXT, nombre TEXT, sku TEXT, precio NUMERIC, precio_regular NUMERIC, precio_oferta NUMERIC,
-      moneda TEXT, currency TEXT,
       stock INTEGER, stock_status TEXT, imagen TEXT, permalink TEXT,
       categorias TEXT[], etiquetas TEXT[], variation_count INTEGER DEFAULT 0,
       search_text TEXT, payload JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(),
       PRIMARY KEY (store_id, id)
     )`);
     await pgPool.query(`ALTER TABLE product_index ADD COLUMN IF NOT EXISTS store_id TEXT NOT NULL DEFAULT 'cl'`);
-    await pgPool.query(`ALTER TABLE product_index ADD COLUMN IF NOT EXISTS moneda TEXT`);
-    await pgPool.query(`ALTER TABLE product_index ADD COLUMN IF NOT EXISTS currency TEXT`);
-    await pgPool.query(`UPDATE product_index
-      SET moneda = COALESCE(moneda, payload->>'moneda', payload->>'currency', CASE WHEN store_id='co' THEN 'COP' ELSE 'CLP' END),
-          currency = COALESCE(currency, payload->>'currency', payload->>'moneda', CASE WHEN store_id='co' THEN 'COP' ELSE 'CLP' END)
-      WHERE moneda IS NULL OR currency IS NULL`);
     try {
       await pgPool.query(`ALTER TABLE product_index DROP CONSTRAINT IF EXISTS product_index_pkey`);
       await pgPool.query(`ALTER TABLE product_index ADD PRIMARY KEY (store_id, id)`);
@@ -647,11 +640,10 @@ async function upsertProductsIndex(products=[]) {
     await client.query('BEGIN');
     for (const p of products) {
       const searchText = productSearchText(p);
-      const moneda = p.moneda || p.currency || ((p.store_id || p.store) === 'co' ? 'COP' : 'CLP');
-      await client.query(`INSERT INTO product_index (store_id,id,type,nombre,sku,precio,precio_regular,precio_oferta,moneda,currency,stock,stock_status,imagen,permalink,categorias,etiquetas,variation_count,search_text,payload,updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,now())
-        ON CONFLICT (store_id,id) DO UPDATE SET type=EXCLUDED.type,nombre=EXCLUDED.nombre,sku=EXCLUDED.sku,precio=EXCLUDED.precio,precio_regular=EXCLUDED.precio_regular,precio_oferta=EXCLUDED.precio_oferta,moneda=EXCLUDED.moneda,currency=EXCLUDED.currency,stock=EXCLUDED.stock,stock_status=EXCLUDED.stock_status,imagen=EXCLUDED.imagen,permalink=EXCLUDED.permalink,categorias=EXCLUDED.categorias,etiquetas=EXCLUDED.etiquetas,variation_count=EXCLUDED.variation_count,search_text=EXCLUDED.search_text,payload=EXCLUDED.payload,updated_at=now()`,
-        [p.store_id || p.store || 'cl',p.id,p.type,p.nombre,p.sku,Number(p.precio||0),Number(p.precio_regular||0),Number(p.precio_oferta||0),moneda,moneda,p.stock,p.stock_status,p.imagen,p.permalink,p.categorias||[],p.etiquetas||[],Number(p.variation_count || 0),searchText,JSON.stringify(p)]);
+      await client.query(`INSERT INTO product_index (store_id,id,type,nombre,sku,precio,precio_regular,precio_oferta,stock,stock_status,imagen,permalink,categorias,etiquetas,variation_count,search_text,payload,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,now())
+        ON CONFLICT (store_id,id) DO UPDATE SET type=EXCLUDED.type,nombre=EXCLUDED.nombre,sku=EXCLUDED.sku,precio=EXCLUDED.precio,precio_regular=EXCLUDED.precio_regular,precio_oferta=EXCLUDED.precio_oferta,stock=EXCLUDED.stock,stock_status=EXCLUDED.stock_status,imagen=EXCLUDED.imagen,permalink=EXCLUDED.permalink,categorias=EXCLUDED.categorias,etiquetas=EXCLUDED.etiquetas,variation_count=EXCLUDED.variation_count,search_text=EXCLUDED.search_text,payload=EXCLUDED.payload,updated_at=now()`,
+        [p.store_id || p.store || 'cl',p.id,p.type,p.nombre,p.sku,Number(p.precio||0),Number(p.precio_regular||0),Number(p.precio_oferta||0),p.stock,p.stock_status,p.imagen,p.permalink,p.categorias||[],p.etiquetas||[],Number(p.variation_count || 0),searchText,JSON.stringify(p)]);
     }
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); console.warn('[Postgres upsert]', e.message); }
@@ -1074,10 +1066,8 @@ app.get('/productos/debug', async (req, res, next) => {
     let sample = [];
     let index_count = await productIndexCount(st.id);
     if (pgPool && dbReady) {
-      const { rows } = await pgPool.query(`SELECT id,nombre,sku,stock_status,store_id,precio,
-        COALESCE(currency, moneda, payload->>'currency', payload->>'moneda', CASE WHEN store_id='co' THEN 'COP' ELSE 'CLP' END) AS currency,
-        payload FROM product_index WHERE store_id=$1 ORDER BY CASE WHEN stock_status='instock' THEN 0 ELSE 1 END, nombre ASC LIMIT 8`, [st.id]);
-      sample = rows.map((r) => ({ id:r.id, nombre:r.nombre, sku:r.sku, stock_status:r.stock_status, store_id:r.store_id, precio:r.precio, currency:r.currency, payload_store:r.payload?.store_id || '', payload_country:r.payload?.country || '' }));
+      const { rows } = await pgPool.query(`SELECT id,nombre,sku,stock_status,store_id,precio,payload FROM product_index WHERE store_id=$1 ORDER BY CASE WHEN stock_status='instock' THEN 0 ELSE 1 END, nombre ASC LIMIT 8`, [st.id]);
+      sample = rows.map((r) => ({ id:r.id, nombre:r.nombre, sku:r.sku, stock_status:r.stock_status, store_id:r.store_id, precio:r.precio, currency:st.currency, payload_store:r.payload?.store_id || '', payload_country:r.payload?.country || '' }));
     }
     res.json({ ok:true, version:APP_VERSION, store:st.id, country:st.country, currency:st.currency, enabled:Boolean(st.wc_url && st.wc_key && st.wc_secret), index_count, sample, sync:syncJob, note:'Si index_count es mayor que 0 y /productos/search sale vacio, el problema era cache viejo o mezcla de tienda.' });
   } catch (error) { next(error); }
