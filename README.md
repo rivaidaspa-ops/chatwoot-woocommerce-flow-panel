@@ -41,3 +41,17 @@ Variables nuevas recomendadas:
 - `WOO_FLOW_GATEWAY_TITLE`: titulo visible del metodo.
 - `PAYMENT_LINK_PROVIDER=woocommerce`: usa links de pago WooCommerce en vez de Flow directo.
 - `PANEL_APP_TOKEN`: token para abrir el panel desde Chatwoot sin popup Basic Auth.
+
+
+## v7.1
+- El carrito ahora muestra miniatura del producto o variación seleccionada.
+- Mejora visual del resumen del pedido antes de crear pedido o link de pago Woo.
+
+
+## v7.3 Chatwoot automático
+
+- La app escucha el contexto de Dashboard Apps mediante `postMessage` y solicita datos con `chatwoot-dashboard-app:fetch-info`.
+- Si Chatwoot no trae email del contacto, consulta la conversación por API y busca un email escrito en los mensajes.
+- Al enviar un producto, se envía el texto del producto con URL de imagen, SKU, variación, precio y link.
+- Aplica etiquetas sin borrar las existentes y puede crear etiquetas/atributos recomendados.
+- Guarda atributos comerciales en la conversación: `rivaida_estado`, `rivaida_ultimo_producto`, `rivaida_ultimo_sku`, `rivaida_email_detectado`.

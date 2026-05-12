@@ -103,7 +103,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v7-woo-payment-link', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v7.3-chatwoot-auto-context-image', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -760,27 +760,171 @@ app.post('/pagar', async (req, res, next) => {
     res.json({ ok: true, provider: 'flow_direct', url: `${data.url}?token=${data.token}`, token: data.token, flow_order: data.flowOrder || null });
   } catch (error) { next(error); }
 });
+
+function extractEmailFromTextBlock(value = '') {
+  const match = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match ? match[0].toLowerCase() : '';
+}
+function extractPhoneFromTextBlock(value = '') {
+  const match = String(value || '').match(/(?:\+?56)?\s?9\s?\d{4}\s?\d{4}|(?:\+?56)?\s?\d{8,9}/);
+  return match ? match[0].replace(/\s+/g, '') : '';
+}
+function extractConversationEmail(conversation = {}) {
+  const sender = conversation?.meta?.sender || conversation?.contact || conversation?.sender || {};
+  const direct = sender.email || conversation.contact_email || conversation.email || '';
+  if (direct) return String(direct).toLowerCase();
+  const pools = [];
+  for (const msg of conversation.messages || []) pools.push(msg.content, msg.processed_message_content, msg.sender?.email, msg.sender?.identifier);
+  pools.push(sender.identifier, sender.name, sender.phone_number);
+  for (const item of pools) {
+    const email = extractEmailFromTextBlock(item);
+    if (email) return email;
+  }
+  return '';
+}
+function normalizeConversationContext(conversation = {}) {
+  const sender = conversation?.meta?.sender || conversation?.contact || conversation?.sender || {};
+  const messages = conversation.messages || [];
+  const email = extractConversationEmail(conversation);
+  let phone = sender.phone_number || sender.phone || '';
+  if (!phone) {
+    for (const msg of messages) {
+      phone = extractPhoneFromTextBlock(msg.content || msg.processed_message_content || '');
+      if (phone) break;
+    }
+  }
+  return {
+    conversationId: conversation.id || conversation.conversation_id || '',
+    email,
+    phone,
+    name: sender.name || sender.available_name || '',
+    labels: conversation.labels || conversation.label_list || [],
+    custom_attributes: conversation.custom_attributes || {},
+    contact: sender,
+    conversation
+  };
+}
+async function getConversationLabels(client, conversationId) {
+  try {
+    const { data } = await client.get(`/conversations/${conversationId}/labels`);
+    return Array.isArray(data?.payload) ? data.payload : (Array.isArray(data) ? data : []);
+  } catch { return []; }
+}
+function cleanLabel(label='') {
+  return String(label).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9_\-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,64);
+}
+const DEFAULT_CHATWOOT_LABELS = [
+  { title:'rivaida_interesado', description:'Cliente interesado en productos', color:'#2563eb' },
+  { title:'rivaida_pendiente_pago', description:'Pedido pendiente de pago', color:'#f59e0b' },
+  { title:'rivaida_link_pago_enviado', description:'Se envio link de pago', color:'#22c55e' },
+  { title:'rivaida_producto_enviado', description:'Producto enviado desde panel', color:'#06b6d4' },
+  { title:'rivaida_rut_validado', description:'RUT validado en panel', color:'#14b8a6' },
+  { title:'rivaida_sin_stock', description:'Consulta por producto sin stock', color:'#ef4444' },
+  { title:'rivaida_postventa', description:'Consulta postventa o seguimiento', color:'#8b5cf6' }
+];
+const DEFAULT_CHATWOOT_ATTRIBUTES = [
+  { attribute_display_name:'Rivaida estado', attribute_key:'rivaida_estado', attribute_description:'Estado comercial desde panel Rivaida', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Rivaida email detectado', attribute_key:'rivaida_email_detectado', attribute_description:'Email tomado del contacto o detectado en la conversacion', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Rivaida ultimo producto', attribute_key:'rivaida_ultimo_producto', attribute_description:'Ultimo producto enviado al chat', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Rivaida ultimo SKU', attribute_key:'rivaida_ultimo_sku', attribute_description:'SKU del ultimo producto enviado', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Rivaida carrito total', attribute_key:'rivaida_carrito_total', attribute_description:'Total estimado del carrito', attribute_display_type:1, attribute_model:0 },
+  { attribute_display_name:'Rivaida rut validado', attribute_key:'rivaida_rut_validado', attribute_description:'RUT validado desde el panel', attribute_display_type:7, attribute_model:0 }
+];
+function productImageUrl(product = {}, variation = null) { return variation?.imagen || product?.imagen || product?.imagenes?.[0]?.src || ''; }
+
 app.post('/chatwoot/enviar-producto', async (req, res, next) => {
   try {
     const client = chatwootClient();
     if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
-    const { conversationId, product, variation, quantity = 1, privateNote = false } = req.body;
+    const { conversationId, product, variation, quantity = 1, privateNote = false, imageUrl = '', autoLabels = true, custom_attributes = {} } = req.body;
     if (!conversationId || !product?.nombre) return res.status(400).json({ error: 'conversationId y producto son obligatorios' });
     const price = variation?.precio || product.precio || 0;
     const attrs = variation?.atributos?.map(a => `${a.name}: ${a.option}`).join(' / ') || '';
-    const content = [`Producto: ${product.nombre}`, attrs ? `Variacion: ${attrs}` : '', `SKU: ${variation?.sku || product.sku || 'N/D'}`, `Precio: $${Number(price || 0).toLocaleString('es-CL')} CLP`, `Cantidad sugerida: ${quantity}`, product.permalink ? `Link: ${product.permalink}` : ''].filter(Boolean).join('\n');
-    await client.post(`/conversations/${conversationId}/messages`, { content, message_type: 'outgoing', private: Boolean(privateNote) });
-    res.json({ ok: true, message: 'Producto enviado a Chatwoot' });
+    const img = imageUrl || productImageUrl(product, variation);
+    const content = [
+      img ? `Imagen: ${img}` : '',
+      `Producto: ${product.nombre}`,
+      attrs ? `Variacion: ${attrs}` : '',
+      `SKU: ${variation?.sku || product.sku || 'N/D'}`,
+      `Precio: $${Number(price || 0).toLocaleString('es-CL')} CLP`,
+      `Cantidad sugerida: ${quantity}`,
+      product.permalink ? `Link: ${product.permalink}` : ''
+    ].filter(Boolean).join('\n');
+    await client.post(`/conversations/${conversationId}/messages`, {
+      content,
+      message_type: 'outgoing',
+      private: Boolean(privateNote),
+      content_type: 'text',
+      content_attributes: { image_url: img || undefined, product_id: product.id, variation_id: variation?.id || undefined, sku: variation?.sku || product.sku || '', price: Number(price || 0) }
+    });
+    if (autoLabels) {
+      const existing = await getConversationLabels(client, conversationId);
+      await client.post(`/conversations/${conversationId}/labels`, { labels: Array.from(new Set([...existing, 'rivaida_interesado', 'rivaida_producto_enviado'])) });
+    }
+    const attrsPayload = { rivaida_estado: 'producto_enviado', rivaida_ultimo_producto: product.nombre, rivaida_ultimo_sku: variation?.sku || product.sku || '', rivaida_ultima_imagen: img || '', ...custom_attributes };
+    try { await client.post(`/conversations/${conversationId}/custom_attributes`, { custom_attributes: attrsPayload }); } catch (e) { console.warn('[Chatwoot atributos envio]', e.response?.data || e.message); }
+    res.json({ ok: true, message: 'Producto enviado a Chatwoot', image_sent_as_url: Boolean(img), imageUrl: img });
   } catch (error) { next(error); }
 });
+
 app.post('/chatwoot/etiquetas', async (req, res, next) => {
   try {
     const client = chatwootClient();
     if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
-    const { conversationId, labels = [] } = req.body;
+    const { conversationId, labels = [], merge = true } = req.body;
     if (!conversationId || !Array.isArray(labels)) return res.status(400).json({ error: 'conversationId y labels son obligatorios' });
-    await client.post(`/conversations/${conversationId}/labels`, { labels });
-    res.json({ ok: true, labels });
+    const incoming = labels.map(cleanLabel).filter(Boolean);
+    const existing = merge ? await getConversationLabels(client, conversationId) : [];
+    const finalLabels = Array.from(new Set([...existing, ...incoming]));
+    await client.post(`/conversations/${conversationId}/labels`, { labels: finalLabels });
+    res.json({ ok: true, labels: finalLabels, merged: Boolean(merge) });
+  } catch (error) { next(error); }
+});
+
+app.post('/chatwoot/etiquetas/setup', async (req, res, next) => {
+  try {
+    const client = chatwootClient();
+    if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
+    const results = [];
+    for (const item of DEFAULT_CHATWOOT_LABELS) {
+      try { const { data } = await client.post('/labels', { ...item, show_on_sidebar: true }); results.push({ title: item.title, ok: true, data }); }
+      catch (e) { results.push({ title: item.title, ok: false, exists: e.response?.status === 422 || e.response?.status === 409, error: e.response?.data || e.message }); }
+    }
+    res.json({ ok: true, results });
+  } catch (error) { next(error); }
+});
+
+app.post('/chatwoot/atributos/setup', async (req, res, next) => {
+  try {
+    const client = chatwootClient();
+    if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
+    const results = [];
+    for (const item of DEFAULT_CHATWOOT_ATTRIBUTES) {
+      try { const { data } = await client.post('/custom_attribute_definitions', item); results.push({ key: item.attribute_key, ok: true, data }); }
+      catch (e) { results.push({ key: item.attribute_key, ok: false, exists: e.response?.status === 422 || e.response?.status === 409, error: e.response?.data || e.message }); }
+    }
+    res.json({ ok: true, results });
+  } catch (error) { next(error); }
+});
+
+app.post('/chatwoot/atributos/conversacion', async (req, res, next) => {
+  try {
+    const client = chatwootClient();
+    if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
+    const { conversationId, custom_attributes = {} } = req.body;
+    if (!conversationId || typeof custom_attributes !== 'object') return res.status(400).json({ error: 'conversationId y custom_attributes son obligatorios' });
+    const { data } = await client.post(`/conversations/${conversationId}/custom_attributes`, { custom_attributes });
+    res.json({ ok: true, custom_attributes, data });
+  } catch (error) { next(error); }
+});
+
+app.get('/chatwoot/conversacion/:id/contexto', async (req, res, next) => {
+  try {
+    const client = chatwootClient();
+    if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
+    const { data } = await client.get(`/conversations/${req.params.id}`);
+    const ctx = normalizeConversationContext(data || {});
+    res.json({ ok: true, ...ctx, email_detected_from_message: Boolean(ctx.email && !(ctx.contact?.email)) });
   } catch (error) { next(error); }
 });
 
@@ -789,12 +933,8 @@ app.post('/chatwoot/recomendaciones', async (req, res, next) => {
     let recommendations = buildRecommendations(req.body || {});
     const aiUrl = process.env.AI_RECOMMENDATION_WEBHOOK_URL || '';
     if (aiUrl) {
-      try {
-        const { data } = await axios.post(aiUrl, { ...req.body, base_recommendations: recommendations }, { timeout: Number(process.env.AI_TIMEOUT_MS || 15000) });
-        recommendations = { ...recommendations, ...(data || {}), ai: true };
-      } catch (e) {
-        recommendations.ai_error = e.message;
-      }
+      try { const { data } = await axios.post(aiUrl, { ...req.body, base_recommendations: recommendations }, { timeout: Number(process.env.AI_TIMEOUT_MS || 15000) }); recommendations = { ...recommendations, ...(data || {}), ai: true }; }
+      catch (e) { recommendations.ai_error = e.message; }
     }
     res.json({ ok: true, recommendations });
   } catch (error) { next(error); }
@@ -806,7 +946,7 @@ app.post('/chatwoot/aplicar-recomendaciones', async (req, res, next) => {
     if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
     const { conversationId, labels = [], message = '', privateNote = true } = req.body;
     if (!conversationId) return res.status(400).json({ error: 'conversationId es obligatorio' });
-    if (Array.isArray(labels) && labels.length) await client.post(`/conversations/${conversationId}/labels`, { labels });
+    if (Array.isArray(labels) && labels.length) { const existing = await getConversationLabels(client, conversationId); await client.post(`/conversations/${conversationId}/labels`, { labels: Array.from(new Set([...existing, ...labels.map(cleanLabel).filter(Boolean)])) }); }
     if (message) await client.post(`/conversations/${conversationId}/messages`, { content: message, message_type: 'outgoing', private: Boolean(privateNote) });
     res.json({ ok: true, labels, message_sent: Boolean(message) });
   } catch (error) { next(error); }
@@ -818,5 +958,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v7 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v7.3 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

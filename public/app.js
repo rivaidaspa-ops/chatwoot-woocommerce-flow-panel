@@ -18,12 +18,90 @@ const state = {
   themeMode: localStorage.getItem('panelThemeMode') || 'light',
   themeAccent: localStorage.getItem('panelThemeAccent') || 'teal',
   orderSearchResults: [],
-  recommendations: null
+  recommendations: null,
+  chatwootContext: null,
+  chatwootReady: false
 };
 const $ = (id) => document.getElementById(id);
 const money = (v) => `$${Number(v || 0).toLocaleString('es-CL')} CLP`;
 const text = (v) => String(v ?? '').replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
 const normalize = (s='') => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+
+function parseMaybeJson(data) {
+  if (!data) return null;
+  if (typeof data === 'string') { try { return JSON.parse(data); } catch { return null; } }
+  return typeof data === 'object' ? data : null;
+}
+function extractEmailFromString(value='') {
+  const match = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match ? match[0].toLowerCase() : '';
+}
+function extractChatwootContext(payload = {}) {
+  const appContext = payload.event === 'appContext' ? payload.data : (payload.appContext || payload.data || payload);
+  const conversation = appContext.conversation || appContext.currentConversation || appContext;
+  const contact = appContext.contact || conversation.contact || conversation.meta?.sender || conversation.sender || appContext.meta?.sender || {};
+  const conversationId = conversation.id || conversation.conversation_id || appContext.conversation_id || appContext.id || '';
+  let email = contact.email || conversation.meta?.sender?.email || conversation.contact_email || appContext.email || '';
+  if (!email) {
+    for (const msg of conversation.messages || []) {
+      email = msg.sender?.email || extractEmailFromString(msg.content || msg.processed_message_content || '');
+      if (email) break;
+    }
+  }
+  const name = contact.name || contact.available_name || conversation.meta?.sender?.name || '';
+  const phone = contact.phone_number || contact.phone || conversation.meta?.sender?.phone_number || '';
+  const labels = conversation.labels || conversation.label_list || [];
+  const customAttributes = conversation.custom_attributes || {};
+  return { raw: payload, appContext, conversation, contact, conversationId, email, name, phone, labels, customAttributes };
+}
+function renderChatwootContext(ctx, source='Chatwoot') {
+  state.chatwootContext = ctx;
+  if (ctx?.conversationId && $('conversationId')) $('conversationId').value = ctx.conversationId;
+  if (ctx?.email && $('customerEmail')) $('customerEmail').value = ctx.email;
+  if (ctx?.phone && $('billingPhone') && !$('billingPhone').value) $('billingPhone').value = ctx.phone;
+  const status = $('chatwootContextStatus');
+  if (status) status.textContent = ctx?.conversationId ? `Conectado a conversación #${ctx.conversationId}` : 'Contexto recibido sin ID de conversación';
+  const box = $('chatwootContextBox');
+  if (box) {
+    box.className = 'chatwoot-context-box active';
+    box.innerHTML = `<strong>${text(ctx?.name || 'Contacto Chatwoot')}</strong><span>Email: ${text(ctx?.email || 'pendiente / no detectado')}</span><span>Conversación: ${text(ctx?.conversationId || 'N/D')}</span><span>Teléfono: ${text(ctx?.phone || 'N/D')}</span><span>Origen: ${text(source)}</span>${ctx?.labels?.length ? `<span>Etiquetas: ${ctx.labels.map(text).join(', ')}</span>` : ''}`;
+  }
+}
+async function enrichContextFromServer(conversationId='') {
+  const id = conversationId || $('conversationId')?.value?.trim();
+  if (!id) return null;
+  const data = await api(`/chatwoot/conversacion/${encodeURIComponent(id)}/contexto`);
+  const ctx = { conversationId: data.conversationId || id, email: data.email || '', name: data.name || '', phone: data.phone || '', labels: data.labels || [], customAttributes: data.custom_attributes || {}, conversation: data.conversation, contact: data.contact };
+  renderChatwootContext(ctx, data.email_detected_from_message ? 'Chatwoot + email detectado en mensajes' : 'Chatwoot API');
+  if (ctx.email && !state.cliente) loadPanel(false).catch(console.warn);
+  return ctx;
+}
+function requestChatwootContext() {
+  if (window.parent && window.parent !== window) {
+    const status = $('chatwootContextStatus');
+    if (status) status.textContent = 'Solicitando contexto a Chatwoot...';
+    window.parent.postMessage('chatwoot-dashboard-app:fetch-info', '*');
+  }
+}
+function installChatwootContextListener() {
+  if (state.chatwootReady) return;
+  state.chatwootReady = true;
+  window.addEventListener('message', (event) => {
+    const payload = parseMaybeJson(event.data);
+    if (!payload) return;
+    if (payload.event !== 'appContext' && !payload.appContext && !payload.conversation && !payload.contact && !payload.meta && !payload.data) return;
+    const ctx = extractChatwootContext(payload);
+    if (!ctx.conversationId && !ctx.email) return;
+    renderChatwootContext(ctx, 'postMessage');
+    if (!ctx.email && ctx.conversationId) enrichContextFromServer(ctx.conversationId).catch(console.warn);
+    else if (ctx.email && !state.cliente) loadPanel(false).catch(console.warn);
+  });
+}
+function autoRequestChatwootContext() {
+  requestChatwootContext();
+  setTimeout(requestChatwootContext, 700);
+  setTimeout(requestChatwootContext, 1800);
+}
 function readUrlParams() {
   const p = new URLSearchParams(location.search);
   const token = p.get('panel_token') || p.get('token') || '';
@@ -32,6 +110,7 @@ function readUrlParams() {
   const conversationId = p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '';
   if (email && $('customerEmail')) $('customerEmail').value = email;
   if (conversationId && $('conversationId')) $('conversationId').value = conversationId;
+  if (email || conversationId) renderChatwootContext({ email, conversationId, name: '', phone: '', labels: [], customAttributes: {} }, 'URL');
 }
 function authHeaders() {
   const headers = { 'Content-Type': 'application/json' };
@@ -63,6 +142,8 @@ async function enterApp() {
   await loadCategorias();
   await loadPaymentMethods();
   readUrlParams();
+  installChatwootContextListener();
+  autoRequestChatwootContext();
   const email = $('customerEmail').value.trim();
   if (email) loadPanel(false); else loadProducts(false);
 }
@@ -265,14 +346,43 @@ async function loadVariations(productId, force=false) {
 }
 function addToCart(product, quantity, variation=null) { const key = `${product.id}:${variation?.id || 0}`; const ex = state.cart.find(i => i.key === key); if (ex) ex.quantity += quantity; else state.cart.push({ key, product, variation, quantity }); renderCart(); }
 function removeFromCart(key) { state.cart = state.cart.filter(i => i.key !== key); renderCart(); }
+function cartItemImage(item) {
+  return item.variation?.imagen || item.product?.imagen || item.product?.imagenes?.[0]?.src || '';
+}
 function renderCart() {
-  if (!state.cart.length) { $('cartBox').innerHTML = 'Seleccione productos o variaciones para el pedido.'; return; }
+  if (!state.cart.length) { $('cartBox').innerHTML = '<div class="cart-empty">Seleccione productos o variaciones para el pedido.</div>'; return; }
   const total = state.cart.reduce((s,i)=>s+Number(i.variation?.precio || i.product.precio || 0)*i.quantity,0);
-  $('cartBox').innerHTML = state.cart.map(i => `<div class="cart-item"><span>${i.quantity}x ${text(i.product.nombre)} ${i.variation ? `<small>(${text(variationLabel(i.variation))})</small>` : ''}</span><strong>${money(Number(i.variation?.precio || i.product.precio || 0)*i.quantity)}</strong><button class="tiny" onclick="removeFromCart('${text(i.key)}')">Quitar</button></div>`).join('') + `<p class="price">Total: ${money(total)}</p>`;
+  $('cartBox').innerHTML = state.cart.map(i => {
+    const unit = Number(i.variation?.precio || i.product.precio || 0);
+    const img = cartItemImage(i);
+    const sku = i.variation?.sku || i.product?.sku || '';
+    const variation = i.variation ? variationLabel(i.variation) : '';
+    return `<div class="cart-item cart-item-rich">
+      <div class="cart-thumb">${img ? `<img src="${text(img)}" alt="${text(i.product.nombre)}" loading="lazy"/>` : '<span>Sin imagen</span>'}</div>
+      <div class="cart-info">
+        <strong>${i.quantity}x ${text(i.product.nombre)}</strong>
+        ${variation ? `<small>${text(variation)}</small>` : ''}
+        ${sku ? `<small>SKU: ${text(sku)}</small>` : ''}
+      </div>
+      <div class="cart-price">
+        <strong>${money(unit*i.quantity)}</strong>
+        <button class="tiny" onclick="removeFromCart('${text(i.key)}')">Quitar</button>
+      </div>
+    </div>`;
+  }).join('') + `<div class="cart-total"><span>Total</span><strong>${money(total)}</strong></div>`;
 }
 async function sendToConversation(product, quantity, variation=null) {
-  const conversationId = $('conversationId').value.trim(); if (!conversationId) return alert('Ingrese ID conversacion Chatwoot.');
-  await api('/chatwoot/enviar-producto', { method:'POST', body: JSON.stringify({ conversationId, product, variation, quantity }) }); alert('Producto enviado a la conversacion.');
+  let conversationId = $('conversationId').value.trim();
+  if (!conversationId) {
+    requestChatwootContext();
+    await new Promise(r => setTimeout(r, 600));
+    conversationId = $('conversationId').value.trim();
+  }
+  if (!conversationId) return alert('No se detectó ID de conversación. Abre el panel dentro de una conversación Chatwoot o ingresa el ID manualmente.');
+  if (!$('customerEmail')?.value?.trim()) await enrichContextFromServer(conversationId).catch(console.warn);
+  const imageUrl = variation?.imagen || product?.imagen || product?.imagenes?.[0]?.src || '';
+  await api('/chatwoot/enviar-producto', { method:'POST', body: JSON.stringify({ conversationId, product, variation, quantity, imageUrl, autoLabels: true }) });
+  alert('Producto enviado a la conversación con imagen/enlace, etiquetas y atributos.');
 }
 function buildProductSearchParams(offset=0) {
   const params = new URLSearchParams();
@@ -501,7 +611,7 @@ function clearOrderSearch() {
   state.orderSearchResults = [];
   renderOrders(state.pedidos);
 }
-async function applyLabels() { const conversationId = $('conversationId').value.trim(); const labels = $('labelInput').value.split(',').map(x=>x.trim()).filter(Boolean); if (!conversationId || !labels.length) return alert('Ingrese conversacion y etiquetas separadas por coma.'); await api('/chatwoot/etiquetas', { method:'POST', body: JSON.stringify({ conversationId, labels }) }); alert('Etiquetas aplicadas.'); }
+async function applyLabels() { const conversationId = $('conversationId').value.trim(); const labels = $('labelInput').value.split(',').map(x=>x.trim()).filter(Boolean); if (!conversationId || !labels.length) return alert('Ingrese conversacion y etiquetas separadas por coma.'); await api('/chatwoot/etiquetas', { method:'POST', body: JSON.stringify({ conversationId, labels, merge: true }) }); alert('Etiquetas aplicadas sin borrar las existentes.'); }
 
 function applyThemeSettings() {
   document.documentElement.dataset.theme = state.themeMode;
@@ -551,14 +661,39 @@ async function applyRecommendedLabels() {
   if (!state.recommendations) await recommendLabels();
   const labels = state.recommendations?.labels || [];
   if (!labels.length) return alert('No hay etiquetas recomendadas.');
-  await api('/chatwoot/etiquetas', { method:'POST', body: JSON.stringify({ conversationId, labels }) });
-  alert('Etiquetas recomendadas aplicadas.');
+  await api('/chatwoot/etiquetas', { method:'POST', body: JSON.stringify({ conversationId, labels, merge: true }) });
+  alert('Etiquetas recomendadas aplicadas sin borrar las existentes.');
 }
 async function copyRecommendation() {
   const msg = $('suggestedMessageBox')?.value || state.recommendations?.suggested_message || '';
   if (!msg) return alert('Primero genera una recomendación.');
   await navigator.clipboard.writeText(msg);
   alert('Respuesta copiada.');
+}
+
+
+async function setupChatwootLabels() {
+  const data = await api('/chatwoot/etiquetas/setup', { method:'POST', body:'{}' });
+  alert(`Etiquetas revisadas/creadas: ${data.results?.length || 0}`);
+}
+async function setupChatwootAttributes() {
+  const data = await api('/chatwoot/atributos/setup', { method:'POST', body:'{}' });
+  alert(`Atributos revisados/creados: ${data.results?.length || 0}`);
+}
+async function saveConversationAttributes() {
+  const conversationId = $('conversationId').value.trim();
+  if (!conversationId) return alert('Primero conecta una conversación.');
+  const cartTotal = state.cart.reduce((sum, item) => sum + Number(item.variation?.precio || item.product?.precio || 0) * Number(item.quantity || 1), 0);
+  const custom_attributes = {
+    rivaida_estado: state.cart.length ? 'carrito_armado' : 'contacto_revisado',
+    rivaida_email_detectado: $('customerEmail')?.value?.trim() || '',
+    rivaida_carrito_total: cartTotal ? String(Math.round(cartTotal)) : '',
+    rivaida_rut_validado: $('rutStatus')?.classList?.contains('ok') ? 'true' : 'false',
+    rivaida_ultimo_producto: state.cart[0]?.product?.nombre || '',
+    rivaida_ultimo_sku: state.cart[0]?.variation?.sku || state.cart[0]?.product?.sku || ''
+  };
+  await api('/chatwoot/atributos/conversacion', { method:'POST', body: JSON.stringify({ conversationId, custom_attributes }) });
+  alert('Atributos guardados en la conversación.');
 }
 
 async function clearCache() { localStorage.removeItem('regionesChileV70'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
@@ -579,6 +714,10 @@ $('billingRegion').addEventListener('change', () => renderComunas($('billingRegi
 $('billingComuna').addEventListener('change', updatePostcode);
 $('billingRut').addEventListener('input', updateRutStatus);
 $('applyLabelsBtn').addEventListener('click', applyLabels);
+$('fetchChatwootContextBtn')?.addEventListener('click', () => enrichContextFromServer().catch(e => alert(e.message)));
+$('setupLabelsBtn')?.addEventListener('click', setupChatwootLabels);
+$('setupAttributesBtn')?.addEventListener('click', setupChatwootAttributes);
+$('saveConversationAttributesBtn')?.addEventListener('click', saveConversationAttributes);
 $('recommendBtn')?.addEventListener('click', recommendLabels);
 $('applyRecommendedLabelsBtn')?.addEventListener('click', applyRecommendedLabels);
 $('copyRecommendationBtn')?.addEventListener('click', copyRecommendation);

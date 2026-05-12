@@ -1,7 +1,7 @@
 {
   "name": "chatwoot-woocommerce-flow-panel",
-  "version": "1.7.0",
-  "description": "Panel Chatwoot WooCommerce Chile v7 Woo payment links via Flow gateway, Chatwoot App variables, clean env",
+  "version": "1.7.3",
+  "description": "Panel Chatwoot WooCommerce Chile v7.3 Chatwoot auto context, image URL messages, labels and attributes",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
