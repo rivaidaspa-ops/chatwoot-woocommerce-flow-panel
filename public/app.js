@@ -24,13 +24,33 @@ const state = {
   recommendations: null,
   chatwootContext: null,
   chatwootReady: false,
-  settings: {}
+  settings: {},
+  variationModalProductId: null
 };
 const $ = (id) => document.getElementById(id);
 function currentStore(){ return state.stores.find(s => s.id === state.activeStore) || { id: state.activeStore, country: state.activeStore === 'co' ? 'CO' : 'CL', currency: state.activeStore === 'co' ? 'COP' : 'CLP', document_label: state.activeStore === 'co' ? 'CC / NIT' : 'RUT' }; }
 const money = (v) => `${Number(v || 0).toLocaleString(currentStore().country === 'CO' ? 'es-CO' : 'es-CL')} ${currentStore().currency || 'CLP'}`;
 const text = (v) => String(v ?? '').replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
 const normalize = (s='') => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+
+function notify(message, type='info', detail='') {
+  const host = $('toastHost');
+  const msg = String(message || '');
+  if (!host) { console.log(`[${type}]`, msg, detail); return; }
+  const el = document.createElement('div');
+  el.className = `toast-message toast-${type}`;
+  const title = type === 'success' ? 'Listo' : type === 'error' ? 'Error' : type === 'warning' ? 'Atención' : 'Aviso';
+  el.innerHTML = `<div><strong>${text(title)}</strong><p>${text(msg)}</p>${detail ? `<small>${text(detail)}</small>` : ''}</div><button type="button" aria-label="Cerrar">×</button>`;
+  el.querySelector('button')?.addEventListener('click', () => el.remove());
+  host.appendChild(el);
+  setTimeout(() => el.classList.add('show'), 10);
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 250); }, type === 'error' ? 6500 : 4200);
+}
+function notifySuccess(message, detail='') { notify(message, 'success', detail); }
+function notifyError(message, detail='') { notify(message, 'error', detail); }
+function notifyWarning(message, detail='') { notify(message, 'warning', detail); }
+const nativeAlert = window.alert.bind(window);
+window.alert = (message) => notify(message, String(message || '').toLowerCase().includes('error') ? 'error' : 'info');
 
 function parseMaybeJson(data) {
   if (!data) return null;
@@ -349,11 +369,32 @@ function visibleAttributes(product) {
   attrs.sort((a,b)=> (preferred.some(x=>normalize(a.name).includes(x)) ? -1 : 1) - (preferred.some(x=>normalize(b.name).includes(x)) ? -1 : 1));
   return attrs.slice(0, 6);
 }
+
+function isStockValueOk(item) {
+  if (!item) return false;
+  if (item.stock_status && item.stock_status !== 'instock') return false;
+  if (item.manage_stock && item.stock !== null && item.stock !== undefined && Number(item.stock) <= 0) return false;
+  return true;
+}
+function canAddProduct(product, variation=null) {
+  if (!product) return { ok: false, reason: 'Producto no encontrado' };
+  if (product.type === 'variable') {
+    if (!product.variations || !product.variations.length) return { ok: false, reason: 'Carga y selecciona una variación disponible.' };
+    if (!variation) return { ok: false, reason: 'Selecciona una variación.' };
+    if (!isStockValueOk(variation)) return { ok: false, reason: 'La variación seleccionada no tiene stock.' };
+    return { ok: true };
+  }
+  if (!isStockValueOk(product)) return { ok: false, reason: 'Este producto no tiene stock.' };
+  return { ok: true };
+}
+function firstInStockVariation(product) {
+  return (product.variations || []).find(isStockValueOk) || (product.variations || [])[0] || null;
+}
 function variationLabel(v) { return (v.atributos || []).filter(a => a.option && !isNoisyAttribute(a.name)).map(a => `${a.name}: ${a.option}`).join(' · ') || v.sku || `Variacion ${v.id}`; }
 function getSelectedVariation(product) {
   if (!product.variations || !product.variations.length) return null;
   const selected = product.selectedVariationId ? product.variations.find(v => String(v.id) === String(product.selectedVariationId)) : null;
-  return selected || product.variations[0];
+  return selected || firstInStockVariation(product);
 }
 function variationMatches(product, v) {
   const choices = product.variationChoices || {};
@@ -373,26 +414,67 @@ function variationGroups(product) {
 function productImage(product) { const v = getSelectedVariation(product); return v?.imagen || product.imagen || product.imagenes?.[0]?.src || ''; }
 function renderVariationPanel(product) {
   if (!product.variation_count && !(product.variations || []).length) return '';
-  if (!product.variations) return `<div class="variation-panel collapsed"><button class="secondary" data-load-vars="${product.id}">Elegir variación (${product.variation_count || 0})</button><span class="muted"> Color, talla e imagen se cargan solo cuando las necesitas.</span></div>`;
-  const groups = variationGroups(product);
-  const filtered = product.variations.filter(v => variationMatches(product, v));
-  const current = filtered.find(v => String(v.id) === String(product.selectedVariationId)) || filtered[0] || getSelectedVariation(product);
-  if (current && String(product.selectedVariationId) !== String(current.id)) product.selectedVariationId = current.id;
-  const selectorHtml = groups.map(g => {
-    const selected = (product.variationChoices || {})[g.name] || '';
-    return `<label class="variation-field"><span>${text(g.name)}</span><select data-var-select="${product.id}" data-var-name="${text(g.name)}"><option value="">Todas las opciones</option>${g.options.map(o => `<option value="${text(o)}" ${selected === o ? 'selected' : ''}>${text(o)}</option>`).join('')}</select></label>`;
-  }).join('');
-  const image = current?.imagen || product.imagen || product.imagenes?.[0]?.src || '';
-  const attrs = current ? (current.atributos || []).filter(a => a.option && !isNoisyAttribute(a.name)).map(a => `<span>${text(a.name)}: <strong>${text(a.option)}</strong></span>`).join('') : '';
-  return `<div class="variation-panel clean"><div class="variation-panel-title"><span>Selecciona la variación</span><button class="tiny ghost" data-refresh-vars="${product.id}">Actualizar</button></div><div class="variation-selectors">${selectorHtml || '<p class="muted">Este producto no tiene atributos visibles para seleccionar.</p>'}</div>${current ? `<div class="selected-variation-card">${image ? `<img src="${text(image)}" loading="lazy" alt=""/>` : `<span class="var-no-img">Sin img</span>`}<div><strong>Variación seleccionada</strong><p>${attrs || text(variationLabel(current))}</p><small>${text(current.sku || 'Sin SKU')} · ${money(current.precio)} · ${current.stock_status === 'instock' ? 'con stock' : 'sin stock'}</small></div></div>` : '<p class="muted">Seleccione una opción para ver disponibilidad.</p>'}<p class="variation-hint">${filtered.length} variación${filtered.length === 1 ? '' : 'es'} disponible${filtered.length === 1 ? '' : 's'} con los filtros actuales.</p></div>`;
+  const current = getSelectedVariation(product);
+  const hasLoaded = Boolean(product.variations && product.variations.length);
+  const can = current ? canAddProduct(product, current) : canAddProduct(product, null);
+  const summary = current ? `<div class="selected-variation-compact ${can.ok ? '' : 'no-stock'}"><strong>${text(variationLabel(current))}</strong><span>${text(current.sku || 'Sin SKU')} · ${money(current.precio)} · ${can.ok ? 'con stock' : 'sin stock'}</span></div>` : '<div class="selected-variation-compact muted">Sin variación seleccionada.</div>';
+  return `<div class="variation-panel compact"><button class="secondary" data-open-vars="${product.id}">${hasLoaded ? 'Cambiar variación' : `Elegir variación (${product.variation_count || 0})`}</button>${summary}</div>`;
 }
 function renderProductCard(p) {
-  const img = productImage(p);
   const current = getSelectedVariation(p);
+  const img = productImage(p);
   const price = current?.precio || p.precio;
-  const stockOk = current ? current.stock_status === 'instock' : p.stock_status === 'instock';
+  const can = canAddProduct(p, current);
+  const stockOk = can.ok;
   const typeText = p.type === 'variable' ? 'Producto variable' : 'Producto simple';
-  return `<article class="product-card" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${stockOk ? 'ok' : 'no'}">${stockOk ? 'Con stock' : 'Sin stock'}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(current?.sku || p.sku)} · ${typeText}${p.variation_count ? ` · ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div>${renderVariationPanel(p)}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1"/><button data-add="${p.id}">Agregar</button><button class="secondary" data-send="${p.id}">Enviar a conversación</button></div></div></article>`;
+  const disabled = can.ok ? '' : 'disabled';
+  return `<article class="product-card ${can.ok ? '' : 'out-of-stock'}" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${stockOk ? 'ok' : 'no'}">${stockOk ? 'Con stock' : 'Sin stock'}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(current?.sku || p.sku)} · ${typeText}${p.variation_count ? ` · ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div>${renderVariationPanel(p)}${!can.ok ? `<div class="stock-warning">${text(can.reason)}</div>` : ''}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1" ${disabled}/><button data-add="${p.id}" ${disabled}>${can.ok ? 'Agregar' : 'Sin stock'}</button><button class="secondary" data-send="${p.id}" ${disabled}>Enviar a conversación</button></div></div></article>`;
+}
+function renderVariationModal() {
+  const product = findProduct(state.variationModalProductId);
+  const body = $('variationModalBody');
+  if (!body || !product) return;
+  if (product.loadingVariations) { body.innerHTML = '<div class="modal-loading"><div class="spinner"></div><strong>Cargando variaciones...</strong></div>'; return; }
+  if (!product.variations || !product.variations.length) {
+    body.innerHTML = `<div class="empty-state"><p>Las variaciones aún no están cargadas.</p><button class="secondary" data-load-vars="${product.id}">Cargar variaciones</button></div>`;
+    bindProductEvents();
+    return;
+  }
+  const groups = variationGroups(product);
+  const current = getSelectedVariation(product);
+  const filtered = product.variations.filter(v => variationMatches(product, v));
+  const selectors = groups.map(g => {
+    const selected = (product.variationChoices || {})[g.name] || '';
+    const options = g.options.map(o => {
+      const hasStock = (product.variations || []).some(v => (v.atributos || []).some(a => a.name === g.name && a.option === o) && isStockValueOk(v));
+      return `<button type="button" class="var-option ${selected === o ? 'active' : ''}" data-var-choice="${product.id}" data-var-name="${text(g.name)}" data-var-value="${text(o)}" ${hasStock ? '' : 'disabled'}>${text(o)}${hasStock ? '' : '<small>Sin stock</small>'}</button>`;
+    }).join('');
+    return `<div class="var-group"><div class="var-group-title"><strong>${text(g.name)}</strong>${selected ? `<button class="tiny ghost" data-var-clear="${product.id}" data-var-name="${text(g.name)}">Limpiar</button>` : ''}</div><div class="var-options">${options}</div></div>`;
+  }).join('');
+  const cards = filtered.slice(0, 40).map(v => {
+    const ok = isStockValueOk(v);
+    const active = current && String(current.id) === String(v.id);
+    const img = v.imagen || product.imagen || product.imagenes?.[0]?.src || '';
+    return `<button type="button" class="var-card ${active ? 'active' : ''} ${ok ? '' : 'disabled'}" data-select-var="${product.id}" data-var-id="${v.id}" ${ok ? '' : 'disabled'}>${img ? `<img src="${text(img)}" alt="" loading="lazy"/>` : '<span class="var-no-img">Sin img</span>'}<span>${text(variationLabel(v))}</span><strong>${money(v.precio)}</strong><small>${text(v.sku || 'Sin SKU')} · ${ok ? 'con stock' : 'sin stock'}</small></button>`;
+  }).join('');
+  const currentOk = current && isStockValueOk(current);
+  body.innerHTML = `<div class="variation-modal-grid"><div>${selectors || '<p class="muted">Sin atributos visibles.</p>'}<div class="var-results-title">Variaciones disponibles</div><div class="var-card-grid">${cards || '<p class="muted">No hay coincidencias con stock para esta selección.</p>'}</div></div><aside class="var-summary"><h3>${text(product.nombre)}</h3>${current ? `${(current.imagen || product.imagen) ? `<img src="${text(current.imagen || product.imagen)}" alt="" loading="lazy"/>` : ''}<p>${text(variationLabel(current))}</p><strong>${money(current.precio)}</strong><small>${text(current.sku || 'Sin SKU')}</small><span class="stock-chip ${currentOk ? 'ok' : 'no'}">${currentOk ? 'Con stock' : 'Sin stock'}</span>` : '<p class="muted">Selecciona una variación.</p>'}</aside></div>`;
+  bindProductEvents();
+}
+function openVariationModal(productId) {
+  const product = findProduct(productId);
+  if (!product) return;
+  state.variationModalProductId = productId;
+  $('variationModal')?.classList.remove('hidden');
+  $('variationModal')?.setAttribute('aria-hidden', 'false');
+  $('variationModalTitle').textContent = product.nombre || 'Seleccionar variación';
+  if (!product.variations && product.variation_count) loadVariations(productId).then(renderVariationModal).catch(e => notifyError(e.message));
+  renderVariationModal();
+}
+function closeVariationModal() {
+  $('variationModal')?.classList.add('hidden');
+  $('variationModal')?.setAttribute('aria-hidden', 'true');
+  state.variationModalProductId = null;
 }
 function renderProducts() {
   setMetric('metricProducts', state.productos.length);
@@ -406,13 +488,14 @@ function renderProducts() {
 }
 function findProduct(id) { return state.productos.find(p => String(p.id) === String(id)); }
 function bindProductEvents() {
-  document.querySelectorAll('[data-load-vars]').forEach(btn => btn.addEventListener('click', () => loadVariations(btn.dataset.loadVars)));
-  document.querySelectorAll('[data-refresh-vars]').forEach(btn => btn.addEventListener('click', () => loadVariations(btn.dataset.refreshVars, true)));
+  document.querySelectorAll('[data-load-vars]').forEach(btn => btn.addEventListener('click', () => loadVariations(btn.dataset.loadVars).then(renderVariationModal)));
+  document.querySelectorAll('[data-open-vars]').forEach(btn => btn.addEventListener('click', () => openVariationModal(btn.dataset.openVars)));
+  document.querySelectorAll('[data-refresh-vars]').forEach(btn => btn.addEventListener('click', () => loadVariations(btn.dataset.refreshVars, true).then(renderVariationModal)));
   document.querySelectorAll('[data-more-vars]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.moreVars); p.variationLimit=(p.variationLimit||8)+12; renderProducts(); }));
-  document.querySelectorAll('[data-var-select]').forEach(sel => sel.addEventListener('change', () => { const p=findProduct(sel.dataset.varSelect); p.variationChoices=p.variationChoices||{}; if (sel.value) p.variationChoices[sel.dataset.varName]=sel.value; else delete p.variationChoices[sel.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); }));
-  document.querySelectorAll('[data-var-choice]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varChoice); p.variationChoices=p.variationChoices||{}; p.variationChoices[btn.dataset.varName]=btn.dataset.varValue; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); }));
-  document.querySelectorAll('[data-var-clear]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varClear); p.variationChoices=p.variationChoices||{}; delete p.variationChoices[btn.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); }));
-  document.querySelectorAll('[data-select-var]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.selectVar); p.selectedVariationId=btn.dataset.varId; renderProducts(); }));
+  document.querySelectorAll('[data-var-select]').forEach(sel => sel.addEventListener('change', () => { const p=findProduct(sel.dataset.varSelect); p.variationChoices=p.variationChoices||{}; if (sel.value) p.variationChoices[sel.dataset.varName]=sel.value; else delete p.variationChoices[sel.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); renderVariationModal(); }));
+  document.querySelectorAll('[data-var-choice]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varChoice); p.variationChoices=p.variationChoices||{}; p.variationChoices[btn.dataset.varName]=btn.dataset.varValue; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); renderVariationModal(); }));
+  document.querySelectorAll('[data-var-clear]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varClear); p.variationChoices=p.variationChoices||{}; delete p.variationChoices[btn.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); renderVariationModal(); }));
+  document.querySelectorAll('[data-select-var]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.selectVar); p.selectedVariationId=btn.dataset.varId; renderProducts(); renderVariationModal(); }));
   document.querySelectorAll('[data-add]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.add); addToCart(p, Math.max(1, Number($(`qty-${p.id}`).value || 1)), getSelectedVariation(p)); }));
   document.querySelectorAll('[data-send]').forEach(btn => btn.addEventListener('click', async () => { const p=findProduct(btn.dataset.send); try { await sendToConversation(p, Math.max(1, Number($(`qty-${p.id}`).value || 1)), getSelectedVariation(p)); } catch(e) { alert(e.message); } }));
 }
@@ -424,11 +507,11 @@ async function loadVariations(productId, force=false) {
     p.variations = data.variations || [];
     p.variation_count = p.variations.length;
     p.variationLimit = 8;
-    p.selectedVariationId = p.variations[0]?.id;
-  } catch (e) { alert(e.message); }
-  finally { p.loadingVariations = false; renderProducts(); }
+    p.selectedVariationId = firstInStockVariation(p)?.id;
+  } catch (e) { notifyError(e.message); }
+  finally { p.loadingVariations = false; renderProducts(); renderVariationModal(); }
 }
-function addToCart(product, quantity, variation=null) { const key = `${product.id}:${variation?.id || 0}`; const ex = state.cart.find(i => i.key === key); if (ex) ex.quantity += quantity; else state.cart.push({ key, product, variation, quantity }); renderCart(); }
+function addToCart(product, quantity, variation=null) { const can = canAddProduct(product, variation); if (!can.ok) { notifyWarning(can.reason); return; } const key = `${product.id}:${variation?.id || 0}`; const ex = state.cart.find(i => i.key === key); if (ex) ex.quantity += quantity; else state.cart.push({ key, product, variation, quantity }); renderCart(); notifySuccess('Producto agregado al carrito', `${product.nombre}${variation ? ' · ' + variationLabel(variation) : ''}`); }
 function removeFromCart(key) { state.cart = state.cart.filter(i => i.key !== key); renderCart(); }
 function cartItemImage(item) {
   return item.variation?.imagen || item.product?.imagen || item.product?.imagenes?.[0]?.src || '';
@@ -462,11 +545,12 @@ async function sendToConversation(product, quantity, variation=null) {
     await new Promise(r => setTimeout(r, 600));
     conversationId = $('conversationId').value.trim();
   }
-  if (!conversationId) return alert('No se detectó ID de conversación. Abre el panel dentro de una conversación Chatwoot o ingresa el ID manualmente.');
+  if (!conversationId) { notifyWarning('No se detectó ID de conversación. Abre el panel dentro de una conversación Chatwoot o ingresa el ID manualmente.'); return; }
   if (!$('customerEmail')?.value?.trim()) await enrichContextFromServer(conversationId).catch(console.warn);
+  const can = canAddProduct(product, variation); if (!can.ok) { notifyWarning(can.reason); return; }
   const imageUrl = variation?.imagen || product?.imagen || product?.imagenes?.[0]?.src || '';
   await api('/chatwoot/enviar-producto', { method:'POST', body: JSON.stringify({ conversationId, product, variation, quantity, imageUrl, autoLabels: true }) });
-  alert('Producto enviado a la conversación. Si Chatwoot/WhatsApp lo permite, la imagen se envió como adjunto real; si falla, se usa enlace de respaldo.');
+  notifySuccess('Producto enviado a la conversación', 'Se intentó adjuntar la imagen real para WhatsApp/Chatwoot.');
 }
 function buildProductSearchParams(offset=0) {
   const params = new URLSearchParams();
@@ -870,7 +954,9 @@ function toggleSettings(show=true) {
   const panel = $('settingsPanel');
   if (!panel) return;
   panel.classList.toggle('hidden', !show);
-  if (show) loadSettings().catch(e => { if ($('settingsStatus')) $('settingsStatus').textContent = e.message; });
+  panel.setAttribute('aria-hidden', show ? 'false' : 'true');
+  document.body.classList.toggle('modal-open', show);
+  if (show) loadSettings().catch(e => { if ($('settingsStatus')) $('settingsStatus').textContent = e.message; notifyError(e.message); });
 }
 function fillSettingsForm(settings = {}) {
   document.querySelectorAll('[data-setting]').forEach((el) => {
@@ -900,7 +986,7 @@ async function saveSettings() {
   await loadCategorias(true);
   await loadPaymentMethods(true);
   await loadShippingMethods(true);
-  alert('Credenciales guardadas. Si cambiaste dominio o CORS, ejecuta Deploy/Restart en EasyPanel para asegurar proxy y caché limpios.');
+  notifySuccess('Credenciales guardadas', 'Si cambiaste dominio o CORS, ejecuta Deploy/Restart en EasyPanel para limpiar proxy y caché.');
 }
 async function testSettings(target, store='') {
   try {
@@ -909,10 +995,11 @@ async function testSettings(target, store='') {
   } catch (e) { alert(`Error en prueba: ${e.message}`); }
 }
 
-async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v74`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
+async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v74`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/stores'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('openSettingsBtn')?.addEventListener('click', () => toggleSettings(true));
 $('closeSettingsBtn')?.addEventListener('click', () => toggleSettings(false));
+$('settingsBackdrop')?.addEventListener('click', () => toggleSettings(false));
 $('saveSettingsBtn')?.addEventListener('click', saveSettings);
 $('testWooClBtn')?.addEventListener('click', () => testSettings('woo','cl'));
 $('testWooCoBtn')?.addEventListener('click', () => testSettings('woo','co'));
@@ -953,7 +1040,11 @@ $('flowOrderDrawerBtn')?.addEventListener('click', flowSelectedOrder);
 $('searchOrdersBtn')?.addEventListener('click', searchOrders);
 $('clearOrderSearchBtn')?.addEventListener('click', clearOrderSearch);
 $('orderSearchInput')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter') searchOrders(); });
-$('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value).catch(e => alert(e.message)));
+$('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value).catch(e => notifyError(e.message)));
+$('closeVariationModalBtn')?.addEventListener('click', closeVariationModal);
+$('variationModalCancelBtn')?.addEventListener('click', closeVariationModal);
+$('variationBackdrop')?.addEventListener('click', closeVariationModal);
+$('variationModalApplyBtn')?.addEventListener('click', () => { closeVariationModal(); notifySuccess('Variación seleccionada'); });
 $('themeMode')?.addEventListener('change', () => updateTheme($('themeMode').value, $('themeAccent')?.value));
 $('themeAccent')?.addEventListener('change', () => updateTheme($('themeMode')?.value, $('themeAccent').value));
 applyThemeSettings();
