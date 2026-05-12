@@ -1,4 +1,4 @@
-// v8.6.2 Rivaida Commerce Hub: deteccion automatica de tienda, Colombia aislado y stock con disponibles primero.
+// v8.6.9 Rivaida Commerce Hub: tienda automatica, aislamiento Colombia/Chile y cache de productos seguro.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',

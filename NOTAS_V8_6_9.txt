@@ -1,0 +1,16 @@
+Rivaida Commerce Hub v8.6.9
+
+Correcciones:
+- Corrige error PostgreSQL: columna "moneda" / "currency" no existe.
+- Agrega migracion automatica para product_index: moneda y currency.
+- Agrega ruta protegida para reparar esquema: /admin/db/repair-product-index?panel_token=TU_TOKEN
+- Corrige log de arranque para mostrar la version real.
+- Mantiene Chile y Colombia.
+- Mantiene Dockerfile node:20-alpine sin dependencias nuevas.
+
+Despues del deploy:
+1. Verificar /health
+2. Abrir /admin/db/repair-product-index?panel_token=TU_TOKEN
+3. Limpiar cache
+4. Sincronizar catalogo Colombia
+5. Probar /productos/debug?store=co&panel_token=TU_TOKEN

@@ -1,7 +1,7 @@
 {
   "name": "rivaida-commerce-hub",
-  "version": "8.6.8",
-  "description": "Rivaida Commerce Hub - aislamiento real Chile/Colombia, cache seguro de productos y debug activo",
+  "version": "8.6.9",
+  "description": "Rivaida Commerce Hub - migracion robusta product_index, aislamiento Chile/Colombia y debug seguro",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

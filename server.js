@@ -1,4 +1,4 @@
-// v8.6.8 Rivaida Commerce Hub: aislamiento real Chile/Colombia, cache de productos seguro y debug activo.
+// v8.6.9 Rivaida Commerce Hub: migracion robusta product_index, aislamiento Chile/Colombia y debug seguro.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -186,7 +186,7 @@ let dbReady = false;
 let redisReady = false;
 let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
 const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.6.8';
+const APP_VERSION = '8.6.9';
 const appLogs = [];
 function addLog(level, message, data = {}) {
   const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
@@ -480,12 +480,19 @@ async function initDb() {
       store_id TEXT NOT NULL DEFAULT 'cl',
       id BIGINT NOT NULL,
       type TEXT, nombre TEXT, sku TEXT, precio NUMERIC, precio_regular NUMERIC, precio_oferta NUMERIC,
+      moneda TEXT, currency TEXT,
       stock INTEGER, stock_status TEXT, imagen TEXT, permalink TEXT,
       categorias TEXT[], etiquetas TEXT[], variation_count INTEGER DEFAULT 0,
       search_text TEXT, payload JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(),
       PRIMARY KEY (store_id, id)
     )`);
     await pgPool.query(`ALTER TABLE product_index ADD COLUMN IF NOT EXISTS store_id TEXT NOT NULL DEFAULT 'cl'`);
+    await pgPool.query(`ALTER TABLE product_index ADD COLUMN IF NOT EXISTS moneda TEXT`);
+    await pgPool.query(`ALTER TABLE product_index ADD COLUMN IF NOT EXISTS currency TEXT`);
+    await pgPool.query(`UPDATE product_index
+      SET moneda = COALESCE(moneda, payload->>'moneda', payload->>'currency', CASE WHEN store_id='co' THEN 'COP' ELSE 'CLP' END),
+          currency = COALESCE(currency, payload->>'currency', payload->>'moneda', CASE WHEN store_id='co' THEN 'COP' ELSE 'CLP' END)
+      WHERE moneda IS NULL OR currency IS NULL`);
     try {
       await pgPool.query(`ALTER TABLE product_index DROP CONSTRAINT IF EXISTS product_index_pkey`);
       await pgPool.query(`ALTER TABLE product_index ADD PRIMARY KEY (store_id, id)`);
@@ -599,7 +606,8 @@ function sanitizeProductsPayloadForStore(payload = {}, store = null) {
       return !productStore || productStore === st.id;
     })
     .map((p) => normalizeProductForStore(p, st));
-  return { ...payload, productos: clean, total: Number(payload.total || clean.length), store_id: st.id, store: st.id, country: st.country, currency: st.currency };
+  const total = clean.length !== original.length ? clean.length : Number(payload.total || clean.length);
+  return { ...payload, productos: clean, total, store_id: st.id, store: st.id, country: st.country, currency: st.currency };
 }
 async function resolveProductsForStore(params, st) {
   let found = await searchProductsIndex(params, st);
@@ -639,10 +647,11 @@ async function upsertProductsIndex(products=[]) {
     await client.query('BEGIN');
     for (const p of products) {
       const searchText = productSearchText(p);
-      await client.query(`INSERT INTO product_index (store_id,id,type,nombre,sku,precio,precio_regular,precio_oferta,stock,stock_status,imagen,permalink,categorias,etiquetas,variation_count,search_text,payload,updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,now())
-        ON CONFLICT (store_id,id) DO UPDATE SET type=EXCLUDED.type,nombre=EXCLUDED.nombre,sku=EXCLUDED.sku,precio=EXCLUDED.precio,precio_regular=EXCLUDED.precio_regular,precio_oferta=EXCLUDED.precio_oferta,stock=EXCLUDED.stock,stock_status=EXCLUDED.stock_status,imagen=EXCLUDED.imagen,permalink=EXCLUDED.permalink,categorias=EXCLUDED.categorias,etiquetas=EXCLUDED.etiquetas,variation_count=EXCLUDED.variation_count,search_text=EXCLUDED.search_text,payload=EXCLUDED.payload,updated_at=now()`,
-        [p.store_id || p.store || 'cl',p.id,p.type,p.nombre,p.sku,Number(p.precio||0),Number(p.precio_regular||0),Number(p.precio_oferta||0),p.stock,p.stock_status,p.imagen,p.permalink,p.categorias||[],p.etiquetas||[],Number(p.variation_count || 0),searchText,JSON.stringify(p)]);
+      const moneda = p.moneda || p.currency || ((p.store_id || p.store) === 'co' ? 'COP' : 'CLP');
+      await client.query(`INSERT INTO product_index (store_id,id,type,nombre,sku,precio,precio_regular,precio_oferta,moneda,currency,stock,stock_status,imagen,permalink,categorias,etiquetas,variation_count,search_text,payload,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,now())
+        ON CONFLICT (store_id,id) DO UPDATE SET type=EXCLUDED.type,nombre=EXCLUDED.nombre,sku=EXCLUDED.sku,precio=EXCLUDED.precio,precio_regular=EXCLUDED.precio_regular,precio_oferta=EXCLUDED.precio_oferta,moneda=EXCLUDED.moneda,currency=EXCLUDED.currency,stock=EXCLUDED.stock,stock_status=EXCLUDED.stock_status,imagen=EXCLUDED.imagen,permalink=EXCLUDED.permalink,categorias=EXCLUDED.categorias,etiquetas=EXCLUDED.etiquetas,variation_count=EXCLUDED.variation_count,search_text=EXCLUDED.search_text,payload=EXCLUDED.payload,updated_at=now()`,
+        [p.store_id || p.store || 'cl',p.id,p.type,p.nombre,p.sku,Number(p.precio||0),Number(p.precio_regular||0),Number(p.precio_oferta||0),moneda,moneda,p.stock,p.stock_status,p.imagen,p.permalink,p.categorias||[],p.etiquetas||[],Number(p.variation_count || 0),searchText,JSON.stringify(p)]);
     }
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); console.warn('[Postgres upsert]', e.message); }
@@ -975,6 +984,17 @@ app.get('/validar-rut', (req, res) => res.json({ rut: formatRut(req.query.rut ||
 app.get('/cache/status', async (req, res) => res.json({ ok: true, memory_items: memoryCache.size, redis: redisReady, postgres: dbReady, sync: syncJob }));
 app.post('/cache/clear', async (req, res) => { const st = storeFromReq(req); memoryCache.clear(); await cacheDelPrefix('productos:'); await cacheDelPrefix(`productos:${st.id}:`); await cacheDelPrefix('cliente:'); await cacheDelPrefix('variations:'); await cacheDelPrefix('categorias:'); await cacheDelPrefix('payment_methods:'); await cacheDelPrefix('shipping_methods:'); res.json({ ok: true, store: st.id, message: 'Cache limpiado' }); });
 
+async function repairProductIndexSchema(req, res, next) {
+  try {
+    const migrated = await initDb();
+    await cacheDelPrefix('productos:');
+    const stores = await Promise.all(listStores().map(async (st) => ({ id: st.id, country: st.country, currency: st.currency, index_count: await productIndexCount(st.id).catch(() => 0) })));
+    res.json({ ok: true, migrated, version: APP_VERSION, message: 'Esquema product_index revisado. Cache de productos limpiado. Ahora sincronice catalogo por tienda.', stores });
+  } catch (error) { next(error); }
+}
+app.post('/admin/db/repair-product-index', repairProductIndexSchema);
+app.get('/admin/db/repair-product-index', repairProductIndexSchema);
+
 app.get('/cliente', async (req, res, next) => {
   try {
     const email = String(req.query.email || req.query.email_cliente || req.query.customer_email || '').trim().toLowerCase();
@@ -1027,14 +1047,15 @@ app.get('/productos/search', async (req, res, next) => {
     const cacheKey = `productos:${st.id}:search:${hashKey(JSON.stringify({ ...params, store: st.id, v: APP_VERSION }))}`;
     const force = req.query.refresh === 'true' || req.query.nocache === 'true';
     let result = await remember(cacheKey, PAGE_CACHE_SECONDS, async () => resolveProductsForStore(params, st), force);
-    let payload = sanitizeProductsPayloadForStore(result.value || { productos: [], total: 0, source: 'empty' }, st);
+    let rawPayload = result.value || { productos: [], total: 0, source: 'empty' };
 
-    // Defensa contra cache viejo o contaminado: si Colombia recibe productos Chile, se borra esa clave y se recalcula sin cache.
-    if (!payloadBelongsToStore(payload, st)) {
+    // Defensa contra cache viejo o contaminado: revisar ANTES de normalizar, porque al normalizar se puede ocultar la mezcla.
+    if (!payloadBelongsToStore(rawPayload, st)) {
       await cacheDelExact(cacheKey);
-      result = { value: await resolveProductsForStore(params, st), cached: false };
-      payload = sanitizeProductsPayloadForStore(result.value || { productos: [], total: 0, source: 'empty' }, st);
+      rawPayload = await resolveProductsForStore(params, st);
+      result = { value: rawPayload, cached: false };
     }
+    let payload = sanitizeProductsPayloadForStore(rawPayload || { productos: [], total: 0, source: 'empty' }, st);
 
     const indexCount = await productIndexCount(st.id);
     // Si hay indice para esta tienda pero el payload quedó vacío por una cache mala, reconstruye desde Postgres/Woo sin cache.
@@ -1053,8 +1074,10 @@ app.get('/productos/debug', async (req, res, next) => {
     let sample = [];
     let index_count = await productIndexCount(st.id);
     if (pgPool && dbReady) {
-      const { rows } = await pgPool.query('SELECT id,nombre,sku,stock_status,store_id,precio,currency,payload FROM product_index WHERE store_id=$1 ORDER BY CASE WHEN stock_status=\'instock\' THEN 0 ELSE 1 END, nombre ASC LIMIT 8', [st.id]);
-      sample = rows.map((r) => ({ id:r.id, nombre:r.nombre, sku:r.sku, stock_status:r.stock_status, store_id:r.store_id, precio:r.precio, payload_store:r.payload?.store_id || '', payload_country:r.payload?.country || '' }));
+      const { rows } = await pgPool.query(`SELECT id,nombre,sku,stock_status,store_id,precio,
+        COALESCE(currency, moneda, payload->>'currency', payload->>'moneda', CASE WHEN store_id='co' THEN 'COP' ELSE 'CLP' END) AS currency,
+        payload FROM product_index WHERE store_id=$1 ORDER BY CASE WHEN stock_status='instock' THEN 0 ELSE 1 END, nombre ASC LIMIT 8`, [st.id]);
+      sample = rows.map((r) => ({ id:r.id, nombre:r.nombre, sku:r.sku, stock_status:r.stock_status, store_id:r.store_id, precio:r.precio, currency:r.currency, payload_store:r.payload?.store_id || '', payload_country:r.payload?.country || '' }));
     }
     res.json({ ok:true, version:APP_VERSION, store:st.id, country:st.country, currency:st.currency, enabled:Boolean(st.wc_url && st.wc_key && st.wc_secret), index_count, sample, sync:syncJob, note:'Si index_count es mayor que 0 y /productos/search sale vacio, el problema era cache viejo o mezcla de tienda.' });
   } catch (error) { next(error); }
@@ -1649,7 +1672,9 @@ app.use((req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
 app.use((error, req, res, next) => {
   console.error('[ERROR]', error.response?.data || error.message);
   const status = error.status || error.response?.status || 500;
-  res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
+  const msg = formatWooError(error);
+  const dbSchemaHint = error.code === '42703' || /columna .* no existe|column .* does not exist/i.test(String(msg));
+  res.status(status).json({ error: msg, status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')), db_schema_hint: dbSchemaHint ? 'Reinicie/deploy para ejecutar migraciones automáticas de product_index. Si persiste, vacie/sincronice indice rapido.' : undefined });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v8.6.2 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v${APP_VERSION} activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });
