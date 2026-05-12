@@ -1,4 +1,4 @@
-// v8.6.1 Rivaida Commerce Hub: carga estable de productos, assets publicos y stock visible por defecto.
+// v8.6.2 Rivaida Commerce Hub: deteccion automatica de tienda, Colombia aislado y stock con disponibles primero.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -207,9 +207,15 @@ function readUrlParams() {
   if (token) { state.panelToken = token; localStorage.setItem('panelToken', token); }
   const email = p.get('email') || p.get('email_cliente') || p.get('customer_email') || p.get('contact_email') || '';
   const conversationId = p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '';
+  const phone = p.get('phone') || p.get('phone_number') || p.get('telefono') || p.get('whatsapp') || '';
+  const inboxId = p.get('inbox_id') || p.get('inboxId') || p.get('inbox.id') || '';
+  const explicitStore = p.get('store') || p.get('country') || p.get('rivaida_store') || '';
+  const labels = (p.get('labels') || p.get('tags') || '').split(',').map(x => x.trim()).filter(Boolean);
   if (email && $('customerEmail')) $('customerEmail').value = email;
   if (conversationId && $('conversationId')) $('conversationId').value = conversationId;
-  if (email || conversationId) renderChatwootContext({ email, conversationId, name: '', phone: '', labels: [], customAttributes: {} }, 'URL');
+  if (email || conversationId || phone || inboxId || explicitStore || labels.length) {
+    renderChatwootContext({ email, conversationId, name: '', phone, inboxId, labels, customAttributes: explicitStore ? { rivaida_store: explicitStore } : {} }, 'URL');
+  }
 }
 function authHeaders() {
   const headers = { 'Content-Type': 'application/json' };
@@ -283,9 +289,10 @@ function configuredStoreNotice() {
 async function loadStores() {
   try {
     const data = await api('/stores'); state.stores = data.stores || [];
-    const urlStore = new URLSearchParams(location.search).get('store');
-    const serverDefault = data.default_store || 'cl';
-    const wanted = urlStore || state.activeStore || serverDefault || 'cl';
+    const urlStore = new URLSearchParams(location.search).get('store') || '';
+    const savedStore = localStorage.getItem('activeStore') || '';
+    const contextStore = state.chatwootContext ? inferStoreFromChatwootContext(state.chatwootContext) : '';
+    const wanted = urlStore || contextStore || savedStore || firstEnabledStoreId() || 'cl';
     const exists = state.stores.find(s => s.id === wanted);
     state.activeStore = exists ? wanted : (firstEnabledStoreId() || state.stores[0]?.id || 'cl');
     if (!isStoreEnabled(state.activeStore)) {
@@ -496,6 +503,18 @@ function isStockValueOk(item) {
   if (item.manage_stock && item.stock !== null && item.stock !== undefined && Number(item.stock) <= 0) return false;
   return true;
 }
+function productHasAvailableStock(product) {
+  if (!product) return false;
+  if (product.type === 'variable') {
+    if (Array.isArray(product.variations) && product.variations.length) return product.variations.some(isStockValueOk);
+    return isStockValueOk(product);
+  }
+  return isStockValueOk(product);
+}
+function stockSortRank(product) { return productHasAvailableStock(product) ? 0 : 1; }
+function sortProductsByStockThenName(a, b) {
+  return stockSortRank(a) - stockSortRank(b) || String(a.nombre || '').localeCompare(String(b.nombre || ''), 'es');
+}
 function canAddProduct(product, variation=null) {
   if (!product) return { ok: false, reason: 'Producto no encontrado' };
   if (product.type === 'variable') {
@@ -545,10 +564,13 @@ function renderProductCard(p) {
   const img = productImage(p);
   const price = current?.precio || p.precio;
   const can = canAddProduct(p, current);
-  const stockOk = can.ok;
+  const available = productHasAvailableStock(p);
   const typeText = p.type === 'variable' ? 'Producto variable' : 'Producto simple';
   const disabled = can.ok ? '' : 'disabled';
-  return `<article class="product-card ${can.ok ? '' : 'out-of-stock'}" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${stockOk ? 'ok' : 'no'}">${stockOk ? 'Con stock' : 'Sin stock'}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(current?.sku || p.sku)} · ${typeText}${p.variation_count ? ` · ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div>${renderVariationPanel(p)}${!can.ok ? `<div class="stock-warning">${text(can.reason)}</div>` : ''}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1" ${disabled}/><button data-add="${p.id}" ${disabled}>${can.ok ? 'Agregar' : 'Sin stock'}</button><button class="secondary" data-send="${p.id}" ${disabled}>Enviar a conversación</button></div></div></article>`;
+  const stockLabel = available ? (p.type === 'variable' && !can.ok ? 'Variaciones disponibles' : 'Con stock') : 'Sin stock';
+  const actionLabel = can.ok ? 'Agregar' : (p.type === 'variable' && available ? 'Elige variación' : 'Sin stock');
+  const warning = !can.ok ? (available && p.type === 'variable' ? 'Selecciona una variación disponible para agregar o enviar.' : can.reason) : '';
+  return `<article class="product-card ${available ? '' : 'out-of-stock'}" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${available ? 'ok' : 'no'}">${stockLabel}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(current?.sku || p.sku)} · ${typeText}${p.variation_count ? ` · ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div>${renderVariationPanel(p)}${warning ? `<div class="stock-warning">${text(warning)}</div>` : ''}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1" ${disabled}/><button data-add="${p.id}" ${disabled}>${actionLabel}</button><button class="secondary" data-send="${p.id}" ${disabled}>Enviar a conversación</button></div></div></article>`;
 }
 function renderVariationModal() {
   const product = findProduct(state.variationModalProductId);
@@ -602,6 +624,7 @@ function renderProducts() {
   const vCount = state.productos.reduce((s,p)=>s+Number(p.variation_count || (p.variations||[]).length || 0),0);
   setMetric('metricVariations', vCount);
   if (!state.productos.length) { $('productsList').innerHTML = '<span class="muted">No hay productos para mostrar.</span>'; $('loadMoreBtn').classList.add('hidden'); return; }
+  state.productos = state.productos.slice().sort(sortProductsByStockThenName);
   $('productsList').innerHTML = state.productos.map(renderProductCard).join('');
   $('loadMoreInfo').textContent = `${state.productos.length}/${state.productTotal || state.productos.length} productos`;
   $('loadMoreBtn').classList.toggle('hidden', !(state.productos.length < state.productTotal || state.productos.length % state.productLimit === 0));
@@ -714,7 +737,7 @@ async function loadProducts(force=false, append=false) {
     if (expectedStore !== state.activeStore) { pushUiLog('warning','Catálogo descartado por cambio de tienda', `${expectedStore} → ${state.activeStore}`); return; }
     if (data.store && data.store !== state.activeStore) { notifyWarning('Catálogo descartado', `El servidor respondió ${data.store}, pero la tienda activa es ${state.activeStore}.`); return; }
     let incoming = (data.productos || []).filter(p => !p.store_id || p.store_id === state.activeStore);
-    incoming = incoming.sort((a,b)=>((b.stock_status === 'instock') - (a.stock_status === 'instock')) || String(a.nombre || '').localeCompare(String(b.nombre || ''),'es'));
+    incoming = incoming.sort(sortProductsByStockThenName);
     state.productos = append ? [...state.productos, ...incoming] : incoming;
     state.productTotal = Number(data.total || state.productos.length);
     state.productOffset = state.productos.length;
@@ -1233,7 +1256,7 @@ function addHelpBubbles() {
   const helpMap = {
     'Email cliente':'Correo del cliente. Si la app se abre dentro de Chatwoot puede detectarlo automáticamente.',
     'ID conversación Chatwoot':'ID de conversación usado para enviar productos, etiquetas y atributos al chat.',
-    'Tienda / pais':'Selecciona Chile o Colombia. Cada país usa catálogo, carrito, pedidos, pagos y envíos separados.',
+    'Tienda / pais':'Selector manual de tienda activa. Dentro de Chatwoot la app también cambia sola por inbox/bandeja, teléfono +56/+57, etiquetas o atributo rivaida_store.',
     'Dominio público':'URL pública de esta app, por ejemplo https://app.rivaida.cl.',
     'Token app Chatwoot':'Token que va en la URL de Dashboard App: ?panel_token=...',
     'Mapa Inbox → tienda JSON':'Ejemplo: {"12":"cl","15":"co"}. Así la app cambia de país por bandeja de WhatsApp.',

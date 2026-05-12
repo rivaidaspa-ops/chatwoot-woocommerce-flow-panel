@@ -1,4 +1,4 @@
-// v8.5 Rivaida Commerce Hub: estabilidad multi-pais, modales, diagnosticos, ayudas y stock seguro.
+// v8.6.2 Rivaida Commerce Hub: stock ordenado correctamente, Colombia aislado y tienda por Chatwoot.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -166,7 +166,7 @@ let dbReady = false;
 let redisReady = false;
 let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
 const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.6.1';
+const APP_VERSION = '8.6.2';
 const appLogs = [];
 function addLog(level, message, data = {}) {
   const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
@@ -564,6 +564,10 @@ function normalizeVariation(v) {
     meta: extractMeta(v.meta_data)
   };
 }
+function serverStockSortRank(p = {}) { return p.stock_status === 'instock' ? 0 : 1; }
+function sortProductsForDisplay(a = {}, b = {}) {
+  return serverStockSortRank(a) - serverStockSortRank(b) || String(a.nombre || '').localeCompare(String(b.nombre || ''), 'es');
+}
 function productSearchText(p) {
   return normalizeText([p.nombre, p.sku, ...(p.categorias || []), ...(p.etiquetas || []), ...(p.atributos || []).map(a => `${a.name} ${(a.options || []).join(' ')}`)].join(' '));
 }
@@ -622,7 +626,7 @@ async function buildProductsPage({ q='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {
   if (String(arguments[0]?.stock || '').toLowerCase() === 'instock') params.stock_status = 'instock';
   const response = await wc.get('/products', { params });
   const total = Number(response.headers['x-wp-total'] || 0);
-  const normalized = response.data.map((p) => normalizeProduct(p, null, st)).sort((a,b)=>((b.stock_status === 'instock') - (a.stock_status === 'instock')) || String(a.nombre).localeCompare(String(b.nombre),'es'));
+  const normalized = response.data.map((p) => normalizeProduct(p, null, st)).sort(sortProductsForDisplay);
   upsertProductsIndex(normalized).catch((e) => console.warn('[index async]', e.message));
   return { productos: normalized, total: total || (Number(offset) + normalized.length + (normalized.length === Number(limit) ? 1 : 0)), source: 'woocommerce_page' };
 }
@@ -635,7 +639,7 @@ function filterProductsLocal(products, { q='', category='', sale=false, stock=''
     if (!nq) return true;
     return productSearchText(p).includes(nq);
   });
-  filtered = filtered.sort((a,b)=>((b.stock_status === 'instock') - (a.stock_status === 'instock')) || String(a.nombre).localeCompare(String(b.nombre),'es'));
+  filtered = filtered.sort(sortProductsForDisplay);
   const total = filtered.length;
   return { productos: filtered.slice(Number(offset), Number(offset)+Number(limit)), total, source: 'memory' };
 }
@@ -1563,5 +1567,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v8.6.1 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v8.6.2 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });
