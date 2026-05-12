@@ -1,3 +1,4 @@
+// v8.1 UI: tolera tiendas sin credenciales, cambio automatico a tienda configurada y errores visibles.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -243,11 +244,35 @@ async function testAuth() {
   try { await api('/stores'); await enterApp(); }
   catch { localStorage.removeItem('panelAuth'); if (!state.panelToken) showLogin(); else showLogin(); }
 }
+function firstEnabledStoreId() {
+  return state.stores.find(s => s.enabled)?.id || '';
+}
+function isStoreEnabled(storeId = state.activeStore) {
+  const st = state.stores.find(s => s.id === storeId);
+  return Boolean(st && st.enabled);
+}
+function configuredStoreNotice() {
+  const enabled = state.stores.filter(s => s.enabled).map(s => s.name || s.id).join(', ');
+  return enabled ? `Tiendas configuradas: ${enabled}` : 'No hay tiendas con WooCommerce configurado. Abre Credenciales y completa al menos Chile o Colombia.';
+}
 async function loadStores() {
   try {
     const data = await api('/stores'); state.stores = data.stores || [];
-    if (!state.stores.find(s => s.id === state.activeStore)) state.activeStore = data.default_store || state.stores[0]?.id || 'cl';
-    const sel = $('storeSelect'); if (sel) { sel.innerHTML = state.stores.map(s => `<option value="${text(s.id)}">${text(s.name || s.id)} · ${text(s.country || s.code || '')}</option>`).join(''); sel.value = state.activeStore; }
+    const exists = state.stores.find(s => s.id === state.activeStore);
+    if (!exists) state.activeStore = data.default_store || firstEnabledStoreId() || state.stores[0]?.id || 'cl';
+    if (exists && !exists.enabled) {
+      const fallback = firstEnabledStoreId();
+      if (fallback && fallback !== state.activeStore) {
+        state.activeStore = fallback;
+        localStorage.setItem('activeStore', state.activeStore);
+        notifyWarning('Tienda sin credenciales', `Se abrió ${currentStore().name || state.activeStore} porque la tienda anterior no tiene WooCommerce configurado.`);
+      }
+    }
+    const sel = $('storeSelect');
+    if (sel) {
+      sel.innerHTML = state.stores.map(s => `<option value="${text(s.id)}">${text(s.name || s.id)} · ${text(s.country || s.code || '')}${s.enabled ? '' : ' · falta configurar'}</option>`).join('');
+      sel.value = state.activeStore;
+    }
     applyStoreUI();
   } catch (e) { console.warn('No se pudieron cargar tiendas:', e.message); }
 }
@@ -264,7 +289,17 @@ function applyStoreUI() {
 async function changeStore(storeId) {
   state.activeStore = storeId || 'cl'; localStorage.setItem('activeStore', state.activeStore);
   state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null;
-  applyStoreUI(); await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); renderCart(); renderOrders([]); await loadProducts(true);
+  applyStoreUI(); renderCart(); renderOrders([]);
+  if (!isStoreEnabled(state.activeStore)) {
+    const st = currentStore();
+    notifyWarning('WooCommerce no configurado', `${st.name || st.id} no tiene credenciales. Puedes seguir usando otra tienda configurada.`);
+    $('productsList').innerHTML = `<div class="empty-state"><strong>${text(st.name || st.id)} no está configurada</strong><p>${text(configuredStoreNotice())}</p><button class="btn btn-sm btn-primary" id="openSettingsFromEmpty">Abrir credenciales</button></div>`;
+    $('openSettingsFromEmpty')?.addEventListener('click', () => toggleSettings(true));
+    $('loadMoreBtn')?.classList.add('hidden');
+    showProductLoader(false);
+    return;
+  }
+  await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); await loadProducts(true);
 }
 async function loadRegiones(force=false) {
   const key = `regiones_${state.activeStore}_v74`;
@@ -607,6 +642,21 @@ function buildProductSearchParams(offset=0) {
 }
 async function loadProducts(force=false, append=false) {
   if (state.productLoading) return;
+  if (!isStoreEnabled(state.activeStore)) {
+    const fallback = firstEnabledStoreId();
+    if (fallback && fallback !== state.activeStore) {
+      notifyWarning('Tienda sin credenciales', `Cambiando a ${state.stores.find(s=>s.id===fallback)?.name || fallback}.`);
+      state.activeStore = fallback; localStorage.setItem('activeStore', fallback);
+      const sel = $('storeSelect'); if (sel) sel.value = fallback;
+      applyStoreUI();
+    } else {
+      $('productsList').innerHTML = `<div class="empty-state"><strong>No hay WooCommerce configurado para esta tienda</strong><p>${text(configuredStoreNotice())}</p><button class="btn btn-sm btn-primary" id="openSettingsFromProducts">Abrir credenciales</button></div>`;
+      $('openSettingsFromProducts')?.addEventListener('click', () => toggleSettings(true));
+      $('loadMoreBtn')?.classList.add('hidden');
+      showProductLoader(false);
+      return;
+    }
+  }
   state.productLoading = true;
   const nextOffset = append ? state.productOffset : 0;
   if (!append) { showProductLoader(true, force ? 'Actualizando vista...' : 'Buscando productos...'); $('productsList').innerHTML = '<div class="skeleton-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div>'; }
@@ -620,7 +670,14 @@ async function loadProducts(force=false, append=false) {
     state.productOffset = state.productos.length;
     renderProducts();
     setLoadingState(data.cached ? 'Listo' : 'Actualizado', `${state.productos.length}/${state.productTotal} productos`);
-  } catch (e) { alert(e.message); }
+  } catch (e) {
+    notifyError('No se pudieron cargar productos', e.message);
+    if (!append) {
+      $('productsList').innerHTML = `<div class="empty-state error"><strong>No se pudo cargar el catálogo</strong><p>${text(e.message)}</p><button class="btn btn-sm btn-primary" id="openSettingsFromError">Revisar credenciales</button></div>`;
+      $('openSettingsFromError')?.addEventListener('click', () => toggleSettings(true));
+      $('loadMoreBtn')?.classList.add('hidden');
+    }
+  }
   finally { state.productLoading = false; showProductLoader(false); }
 }
 async function syncProducts() {
@@ -1026,10 +1083,13 @@ async function saveSettings() {
   if ($('settingsStatus')) $('settingsStatus').textContent = `Guardado: ${data.saved_keys?.length || 0} variables. Recargando tiendas...`;
   await loadSettings().catch(()=>{});
   await loadStores();
-  await loadRegiones(true);
-  await loadCategorias(true);
-  await loadPaymentMethods(true);
-  await loadShippingMethods(true);
+  if (isStoreEnabled(state.activeStore)) {
+    await loadRegiones(true);
+    await loadCategorias(true);
+    await loadPaymentMethods(true);
+    await loadShippingMethods(true);
+    await loadProducts(true);
+  }
   notifySuccess('Credenciales guardadas', 'Si cambiaste dominio o CORS, ejecuta Deploy/Restart en EasyPanel para limpiar proxy y caché.');
 }
 async function testSettings(target, store='') {

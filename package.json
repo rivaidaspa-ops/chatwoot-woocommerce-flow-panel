@@ -1,7 +1,7 @@
 {
   "name": "chatwoot-woocommerce-flow-panel",
-  "version": "8.0.0",
-  "description": "Panel Chatwoot WooCommerce multi-pais v7.7 con credenciales en interfaz y metodos de pago/envio Woo automaticos",
+  "version": "8.1.0",
+  "description": "Panel Chatwoot WooCommerce multi-pais v8.1 tolerante a credenciales faltantes",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

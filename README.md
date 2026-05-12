@@ -114,3 +114,11 @@ Las credenciales ya no necesitan editarse en `.env`: entra al panel, abre **Cred
 - IA opcional: OpenAI, DeepSeek, Gemini o webhook.
 - Cambio automático de tienda por inbox de Chatwoot, etiquetas o código de país del teléfono (+56 Chile, +57 Colombia).
 - Nuevas variables: CHATWOOT_INBOX_STORE_MAP, CL_CHATWOOT_INBOX_IDS, CO_CHATWOOT_INBOX_IDS, AUTO_STORE_BY_PHONE, AI_PROVIDER, OPENAI_API_KEY, DEEPSEEK_API_KEY, GEMINI_API_KEY.
+
+
+## v8.1
+
+- Si Chile o Colombia no tiene credenciales, la otra tienda sigue funcionando.
+- El panel cambia automaticamente a la primera tienda configurada.
+- El indice de productos separa productos por tienda para no mezclar Chile y Colombia.
+- Los errores de carga muestran un mensaje claro y boton para abrir Credenciales.

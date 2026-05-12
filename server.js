@@ -1,4 +1,4 @@
-// v8.0: credenciales UI robustas, tabla app_settings, pruebas Woo CL/CO y multitienda estable.
+// v8.1: multitienda tolerante a credenciales faltantes, productos por tienda y mensajes claros.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -110,7 +110,7 @@ const wcClients = new Map();
 function rebuildRuntimeConfig() { STORE_CONFIG = buildStoreConfig(); wcClients.clear(); allowedOrigins = parseAllowedOrigins(); }
 
 function listStores() { return Object.values(STORE_CONFIG).map((s)=>({ id:s.id, code:s.code, name:s.name, country:s.country, currency:s.currency, document_label:s.document_label, document_type:s.document_type, payment_gateway_id:s.payment_gateway_id, payment_presets:s.payment_presets||[], enabled:Boolean(s.wc_url&&s.wc_key&&s.wc_secret) })); }
-function resolveStore(input='') { const raw=String(input||'').trim().toLowerCase(); return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>String(s.country||s.code).toLowerCase()===raw) || STORE_CONFIG[DEFAULT_STORE] || Object.values(STORE_CONFIG)[0]; }
+function resolveStore(input='') { const raw=String(input||'').trim().toLowerCase(); return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>String(s.country||s.code).toLowerCase()===raw) || STORE_CONFIG[currentDefaultStore()] || Object.values(STORE_CONFIG)[0]; }
 function storeFromReq(req) { return resolveStore(req.query.store || req.query.country || req.body?.store_id || req.body?.store || req.body?.country || req.headers['x-store-id'] || currentDefaultStore()); }
 function missingWooFields(st = {}) {
   const missing = [];
@@ -266,14 +266,14 @@ function formatWooError(error) {
 function getOrderPayUrl(order = {}, store = null) {
   const direct = order.payment_url || order.checkout_payment_url || order.pay_url || '';
   if (direct) return direct;
-  const st = store ? resolveStore(store.id || store) : resolveStore(DEFAULT_STORE);
+  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
   const key = order.order_key || order.orderKey || '';
   if (st?.wc_url && order.id && key) return `${st.wc_url}/checkout/order-pay/${order.id}/?pay_for_order=true&key=${encodeURIComponent(key)}`;
   return '';
 }
 
 function preferredWooPaymentGateway(body = {}, store = null) {
-  const st = store ? resolveStore(store.id || store) : resolveStore(DEFAULT_STORE);
+  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
   return body.gateway_id || body.payment_method || st.payment_gateway_id || process.env.WOO_FLOW_GATEWAY_ID || process.env.WOO_PAYMENT_GATEWAY_ID || 'flow';
 }
 
@@ -430,13 +430,21 @@ async function initDb() {
   if (!pgPool) return false;
   try {
     await pgPool.query(`CREATE TABLE IF NOT EXISTS product_index (
-      id BIGINT PRIMARY KEY,
+      store_id TEXT NOT NULL DEFAULT 'cl',
+      id BIGINT NOT NULL,
       type TEXT, nombre TEXT, sku TEXT, precio NUMERIC, precio_regular NUMERIC, precio_oferta NUMERIC,
       stock INTEGER, stock_status TEXT, imagen TEXT, permalink TEXT,
       categorias TEXT[], etiquetas TEXT[], variation_count INTEGER DEFAULT 0,
-      search_text TEXT, payload JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT now()
+      search_text TEXT, payload JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT now(),
+      PRIMARY KEY (store_id, id)
     )`);
-    await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_search_text ON product_index (search_text)`);
+    await pgPool.query(`ALTER TABLE product_index ADD COLUMN IF NOT EXISTS store_id TEXT NOT NULL DEFAULT 'cl'`);
+    try {
+      await pgPool.query(`ALTER TABLE product_index DROP CONSTRAINT IF EXISTS product_index_pkey`);
+      await pgPool.query(`ALTER TABLE product_index ADD PRIMARY KEY (store_id, id)`);
+    } catch (e) { console.warn('[Postgres migrate product_index]', e.message); }
+    await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_store ON product_index (store_id)`);
+    await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_search_text ON product_index (store_id, search_text)`);
     await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_sku ON product_index (sku)`);
     await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_categories ON product_index USING gin(categorias)`);
     await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_product_index_sale ON product_index (precio_oferta)`);
@@ -448,9 +456,9 @@ async function initDb() {
   } catch (e) { console.warn('[Postgres] no disponible:', e.message); return false; }
 }
 initDb();
-async function productIndexCount() {
+async function productIndexCount(store = currentDefaultStore()) {
   if (!pgPool || !dbReady) return 0;
-  try { const { rows } = await pgPool.query('SELECT COUNT(*)::int AS count FROM product_index'); return Number(rows[0]?.count || 0); } catch { return 0; }
+  try { const st = resolveStore(store); const { rows } = await pgPool.query('SELECT COUNT(*)::int AS count FROM product_index WHERE store_id=$1', [st.id]); return Number(rows[0]?.count || 0); } catch { return 0; }
 }
 function extractMeta(metaData = []) {
   const result = {};
@@ -467,7 +475,7 @@ function isNoisyAttributeName(name='') {
   return noisy.some(x => n.includes(x));
 }
 function normalizeProduct(product, variations = null, store = null) {
-  const st = store ? resolveStore(store.id || store) : resolveStore(DEFAULT_STORE);
+  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
   const attrs = (product.attributes || []).filter(a => a && a.name && !isNoisyAttributeName(a.name)).map((a) => ({ id: a.id, name: a.name, options: Array.isArray(a.options) ? a.options.slice(0, 30) : [], variation: a.variation }));
   return {
     id: product.id,
@@ -522,19 +530,20 @@ async function upsertProductsIndex(products=[]) {
     await client.query('BEGIN');
     for (const p of products) {
       const searchText = productSearchText(p);
-      await client.query(`INSERT INTO product_index (id,type,nombre,sku,precio,precio_regular,precio_oferta,stock,stock_status,imagen,permalink,categorias,etiquetas,variation_count,search_text,payload,updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
-        ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type,nombre=EXCLUDED.nombre,sku=EXCLUDED.sku,precio=EXCLUDED.precio,precio_regular=EXCLUDED.precio_regular,precio_oferta=EXCLUDED.precio_oferta,stock=EXCLUDED.stock,stock_status=EXCLUDED.stock_status,imagen=EXCLUDED.imagen,permalink=EXCLUDED.permalink,categorias=EXCLUDED.categorias,etiquetas=EXCLUDED.etiquetas,variation_count=EXCLUDED.variation_count,search_text=EXCLUDED.search_text,payload=EXCLUDED.payload,updated_at=now()`,
-        [p.id,p.type,p.nombre,p.sku,Number(p.precio||0),Number(p.precio_regular||0),Number(p.precio_oferta||0),p.stock,p.stock_status,p.imagen,p.permalink,p.categorias||[],p.etiquetas||[],Number(p.variation_count || 0),searchText,JSON.stringify(p)]);
+      await client.query(`INSERT INTO product_index (store_id,id,type,nombre,sku,precio,precio_regular,precio_oferta,stock,stock_status,imagen,permalink,categorias,etiquetas,variation_count,search_text,payload,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,now())
+        ON CONFLICT (store_id,id) DO UPDATE SET type=EXCLUDED.type,nombre=EXCLUDED.nombre,sku=EXCLUDED.sku,precio=EXCLUDED.precio,precio_regular=EXCLUDED.precio_regular,precio_oferta=EXCLUDED.precio_oferta,stock=EXCLUDED.stock,stock_status=EXCLUDED.stock_status,imagen=EXCLUDED.imagen,permalink=EXCLUDED.permalink,categorias=EXCLUDED.categorias,etiquetas=EXCLUDED.etiquetas,variation_count=EXCLUDED.variation_count,search_text=EXCLUDED.search_text,payload=EXCLUDED.payload,updated_at=now()`,
+        [p.store_id || p.store || 'cl',p.id,p.type,p.nombre,p.sku,Number(p.precio||0),Number(p.precio_regular||0),Number(p.precio_oferta||0),p.stock,p.stock_status,p.imagen,p.permalink,p.categorias||[],p.etiquetas||[],Number(p.variation_count || 0),searchText,JSON.stringify(p)]);
     }
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); console.warn('[Postgres upsert]', e.message); }
   finally { client.release(); }
 }
-async function searchProductsIndex({ q='', category='', sale=false, stock='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {}) {
+async function searchProductsIndex({ q='', category='', sale=false, stock='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {}, store = currentDefaultStore()) {
   if (!pgPool || !dbReady) return null;
-  if (await productIndexCount() === 0) return null;
-  const clauses=[]; const values=[];
+  const st = resolveStore(store);
+  if (await productIndexCount(st.id) === 0) return null;
+  const clauses=['store_id = $1']; const values=[st.id];
   if (q) { values.push(`%${normalizeText(q)}%`); clauses.push(`search_text ILIKE $${values.length}`); }
   if (category) { values.push(category); clauses.push(`$${values.length} = ANY(categorias)`); }
   if (sale) clauses.push(`(COALESCE(precio_oferta,0) > 0 OR payload->>'en_oferta' = 'true')`);
@@ -544,7 +553,7 @@ async function searchProductsIndex({ q='', category='', sale=false, stock='', li
   const { rows } = await pgPool.query(`SELECT payload, count(*) OVER() AS total FROM product_index ${where} ORDER BY updated_at DESC, nombre ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values);
   return { productos: rows.map(r => r.payload), total: Number(rows[0]?.total || 0), source: 'postgres' };
 }
-async function getVariations(productId, store = resolveStore(DEFAULT_STORE), force=false) {
+async function getVariations(productId, store = resolveStore(currentDefaultStore()), force=false) {
   const st = resolveStore(store.id || store);
   const wc = wcForStore(st);
   const key = `variations:${st.id}:${productId}`;
@@ -560,7 +569,7 @@ async function getVariations(productId, store = resolveStore(DEFAULT_STORE), for
     return variations;
   }, force)).value;
 }
-async function buildProductsPage({ q='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {}, store = resolveStore(DEFAULT_STORE)) {
+async function buildProductsPage({ q='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {}, store = resolveStore(currentDefaultStore())) {
   const st = resolveStore(store.id || store);
   const wc = wcForStore(st);
   const page = Math.floor(Number(offset || 0) / Number(limit || PRODUCT_PAGE_SIZE)) + 1;
@@ -569,7 +578,7 @@ async function buildProductsPage({ q='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {
   const response = await wc.get('/products', { params });
   const total = Number(response.headers['x-wp-total'] || 0);
   const normalized = response.data.map((p) => normalizeProduct(p, null, st));
-  if (st.id === DEFAULT_STORE) upsertProductsIndex(normalized).catch((e) => console.warn('[index async]', e.message));
+  upsertProductsIndex(normalized).catch((e) => console.warn('[index async]', e.message));
   return { productos: normalized, total: total || (Number(offset) + normalized.length + (normalized.length === Number(limit) ? 1 : 0)), source: 'woocommerce_page' };
 }
 function filterProductsLocal(products, { q='', category='', sale=false, stock='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {}) {
@@ -584,7 +593,7 @@ function filterProductsLocal(products, { q='', category='', sale=false, stock=''
   const total = filtered.length;
   return { productos: filtered.slice(Number(offset), Number(offset)+Number(limit)), total, source: 'memory' };
 }
-async function runCatalogSync(store = resolveStore(DEFAULT_STORE)) {
+async function runCatalogSync(store = resolveStore(currentDefaultStore())) {
   const st = resolveStore(store.id || store);
   const wc = wcForStore(st);
   if (syncJob.running) return;
@@ -642,7 +651,7 @@ function buildDocumentMeta(documentValue, store) {
   const fields = Array.isArray(st.document_fields) && st.document_fields.length ? st.document_fields : (st.country === 'CL' ? ['billing_rut','shipping_rut'] : ['billing_document','shipping_document']);
   return fields.map((key) => ({ key, value: formatted }));
 }
-function normalizeCheckout(body, store = resolveStore(DEFAULT_STORE)) {
+function normalizeCheckout(body, store = resolveStore(currentDefaultStore())) {
   const st = resolveStore(store.id || store);
   const documentValue = String(body.document || body.rut || body.billing?.rut || body.billing?.document || getMetaValue(body.meta_data, RUT_META_KEYS) || '').trim();
   if (st.document_required !== false && st.document_type === 'rut' && !validateRut(documentValue)) { const e = new Error('RUT chileno invalido o faltante'); e.status = 400; throw e; }
@@ -661,7 +670,7 @@ function normalizeCheckout(body, store = resolveStore(DEFAULT_STORE)) {
   const metaData = mergeMetaData([...safeIncomingMeta,{key:'rivaida_store',value:st.id},{key:'rivaida_country',value:st.country},...buildDocumentMeta(documentValue, st)]);
   return { payment_method: body.payment_method || st.payment_gateway_id || process.env.WOO_FLOW_GATEWAY_ID || 'flow', payment_method_title: body.payment_method_title || st.payment_gateway_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Pago WooCommerce', set_paid:false, status:body.status||'pending', billing, shipping, line_items:(body.line_items||[]).map((i)=>({ product_id:Number(i.product_id), variation_id:i.variation_id?Number(i.variation_id):undefined, quantity:Number(i.quantity) })), shipping_lines:body.shipping_lines||[], customer_note:body.customer_note||'', meta_data:metaData };
 }
-async function validateStock(lineItems = [], store = resolveStore(DEFAULT_STORE)) {
+async function validateStock(lineItems = [], store = resolveStore(currentDefaultStore())) {
   const wc = wcForStore(store);
   if (!Array.isArray(lineItems) || !lineItems.length) { const e = new Error('Debe incluir al menos un producto'); e.status = 400; throw e; }
   for (const item of lineItems) {
@@ -814,14 +823,14 @@ app.get('/productos/search', async (req, res, next) => {
     const cacheKey = `productos:${st.id}:search:${hashKey(JSON.stringify(params))}`;
     const force = req.query.refresh === 'true';
     const result = await remember(cacheKey, PAGE_CACHE_SECONDS, async () => {
-      let found = st.id === DEFAULT_STORE ? await searchProductsIndex(params) : null;
+      let found = await searchProductsIndex(params, st);
       if (!found) {
         found = await buildProductsPage(params, st);
         if (params.category || params.sale || params.stock === 'instock') found = filterProductsLocal(found.productos, { ...params, offset: 0 });
       }
       return found;
     }, force);
-    res.json({ ...result.value, store:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count: st.id === DEFAULT_STORE ? await productIndexCount() : 0, sync:syncJob });
+    res.json({ ...result.value, store:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count: await productIndexCount(st.id), sync:syncJob });
   } catch (error) { next(error); }
 });
 app.get('/productos/:id/variaciones', async (req, res, next) => {
@@ -994,7 +1003,7 @@ app.delete('/pedidos/:id', async (req, res, next) => {
 });
 
 
-function buildPlatformSalePayload(body = {}, store = resolveStore(DEFAULT_STORE)) {
+function buildPlatformSalePayload(body = {}, store = resolveStore(currentDefaultStore())) {
   const st = resolveStore(store.id || store);
   const checkout = normalizeCheckout(body, st);
   const fullName = `${checkout.billing.first_name || ''} ${checkout.billing.last_name || ''}`.trim();
@@ -1346,7 +1355,7 @@ app.use((req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
 app.use((error, req, res, next) => {
   console.error('[ERROR]', error.response?.data || error.message);
   const status = error.status || error.response?.status || 500;
-  res.status(status).json({ error: formatWooError(error), status });
+  res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v7.5 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.1 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });
