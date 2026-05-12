@@ -220,7 +220,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.0-credentials-fix', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.2-coupons-regions-stock', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -277,12 +277,14 @@ function preferredWooPaymentGateway(body = {}, store = null) {
   return body.gateway_id || body.payment_method || st.payment_gateway_id || process.env.WOO_FLOW_GATEWAY_ID || process.env.WOO_PAYMENT_GATEWAY_ID || 'flow';
 }
 
-function loadRegiones() {
-  const jsonPath = path.join(__dirname, 'data', 'regiones-comunas-chile.json');
-  if (!fs.existsSync(jsonPath)) return [];
-  return JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+function loadJsonFile(relativePath, fallback = []) {
+  const filePath = path.join(__dirname, relativePath);
+  if (!fs.existsSync(filePath)) return fallback;
+  try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (e) { console.warn('[data json]', relativePath, e.message); return fallback; }
 }
-function loadComunas() {
+function loadRegionesChile() { return loadJsonFile(path.join('data', 'regiones-comunas-chile.json')); }
+function loadRegionesColombia() { return loadJsonFile(path.join('data', 'regiones-comunas-colombia-dropi.json')); }
+function loadComunasChileCsv() {
   const csvPath = path.join(__dirname, 'data', 'starter-comunas-chile.csv');
   if (!fs.existsSync(csvPath)) return [];
   const rows = fs.readFileSync(csvPath, 'utf8').split(/\r?\n/).slice(1).filter(Boolean);
@@ -291,77 +293,81 @@ function loadComunas() {
     return { comuna: (comuna || '').trim(), postcode: (postcode || '').trim() };
   }).filter((x) => x.comuna && x.postcode);
 }
-const comunas = loadComunas();
-const comunaMap = new Map(comunas.map((x) => [normalizeText(x.comuna), x.postcode]));
-function getPostcode(comuna, fallback = '8320000') { return comunaMap.get(normalizeText(comuna)) || fallback; }
-const rawRegiones = loadRegiones();
-const regiones = rawRegiones.map((r) => ({
+const chilePostcodeMap = new Map(loadComunasChileCsv().map((x) => [normalizeText(x.comuna), x.postcode]));
+const CO_DEPT_DEFAULT_POSTCODES = {
+  AMZ:'910001', ANT:'050001', ARU:'810001', ATL:'080001', BOL:'130001', BOY:'150001', CAL:'170001', CAQ:'180001', CAS:'850001', CAU:'190001', CES:'200001', CHOC:'270001', COR:'230001', CUN:'250001', GUA:'940001', GUV:'950001', HUI:'410001', GUJ:'440001', MAG:'470001', MET:'500001', NAR:'520001', NSA:'540001', PUT:'860001', QUI:'630001', RIS:'660001', SAP:'880001', SAN:'680001', SUC:'700001', TOL:'730001', VAC:'760001', VAU:'970001', VID:'990001', DC:'110111'
+};
+const CO_CITY_POSTCODES = new Map(Object.entries({
+  'bogota':'110111','bogota dc':'110111','bogota d.c.':'110111','medellin':'050001','bello':'051050','itagui':'055410','envigado':'055420','barranquilla':'080001','cartagena':'130001','cali':'760001','palmira':'763531','bucaramanga':'680001','floridablanca':'681001','girón':'687541','giron':'687541','piedecuesta':'681011','pereira':'660001','dosquebradas':'661001','manizales':'170001','armenia':'630001','ibague':'730001','neiva':'410001','villavicencio':'500001','cucuta':'540001','pastо':'520001','pasto':'520001','monteria':'230001','sincelejo':'700001','valledupar':'200001','santa marta':'470001','riohacha':'440001','tunja':'150001','popayan':'190001','yopal':'850001','leticia':'910001','quibdo':'270001','mocoa':'860001','arauca':'810001','florencia':'180001','san andres':'880001','mitu':'970001','puerto carreño':'990001','puerto carreno':'990001','inirida':'940001','san jose del guaviare':'950001'
+}).map(([k,v]) => [normalizeText(k), v]));
+function getChilePostcode(comuna, fallback = '8320000') { return chilePostcodeMap.get(normalizeText(comuna)) || fallback || '8320000'; }
+function getColombiaPostcode(city = '', deptCode = '', fallback = '110111') {
+  const cityCode = CO_CITY_POSTCODES.get(normalizeText(city));
+  if (cityCode) return cityCode;
+  const dept = String(deptCode || '').toUpperCase();
+  return CO_DEPT_DEFAULT_POSTCODES[dept] || fallback || '110111';
+}
+const regionesChile = loadRegionesChile().map((r) => ({
   ...r,
+  country: 'CL',
   region_original: r.region,
   region: normalizeRegionForAli(r.region),
-  comunas: (r.comunas || []).map((nombre) => ({ comuna: nombre, postcode: getPostcode(nombre, process.env.DEFAULT_POSTCODE || '8320000') }))
+  comunas: (r.comunas || []).map((nombre) => ({ comuna: nombre, city: nombre, postcode: getChilePostcode(nombre, process.env.DEFAULT_POSTCODE || '8320000') }))
 }));
-const comunaRegionMap = new Map();
-for (const region of regiones) for (const c of region.comunas) comunaRegionMap.set(normalizeText(c.comuna), { codigo: region.codigo, region: region.region, region_original: region.region_original });
-const regionMapByCode = new Map(regiones.map((r) => [String(r.codigo || '').toUpperCase(), r]));
-const regionMapByName = new Map();
-for (const r of regiones) {
-  regionMapByName.set(normalizeText(r.region || ''), r);
-  regionMapByName.set(normalizeText(r.region_original || ''), r);
-}
-
-const RUT_META_KEYS = [
-  'billing_rut', '_billing_rut', 'shipping_rut', '_shipping_rut',
-  'rut', '_rut', 'run', '_run'
-];
-
-function getMetaValue(metaData = [], keys = []) {
-  const wanted = new Set(keys.map((k) => normalizeText(k)));
-  for (const m of metaData || []) {
-    const key = normalizeText(m.key || '');
-    if (wanted.has(key) && m.value !== undefined && m.value !== null && String(m.value).trim() !== '') return String(m.value).trim();
+const regionesColombia = loadRegionesColombia().map((r) => ({
+  codigo: r.codigo,
+  country: 'CO',
+  region_original: r.region,
+  region: removeDiacritics(r.region || ''),
+  comunas: (r.comunas || []).map((nombre) => ({ comuna: nombre, city: nombre, postcode: getColombiaPostcode(nombre, r.codigo, process.env.CO_DEFAULT_POSTCODE || '110111') }))
+}));
+function mapsForRegions(regions) {
+  const byCity = new Map(); const byCode = new Map(); const byName = new Map();
+  for (const region of regions) {
+    byCode.set(String(region.codigo || '').toUpperCase(), region);
+    byName.set(normalizeText(region.region || ''), region);
+    byName.set(normalizeText(region.region_original || ''), region);
+    for (const c of region.comunas || []) byCity.set(normalizeText(c.comuna || c.city || ''), { codigo: region.codigo, region: region.region, region_original: region.region_original, postcode: c.postcode });
   }
-  return '';
+  return { byCity, byCode, byName };
 }
-
-function mergeMetaData(meta = []) {
-  // Ultimo valor gana. Asi los aliases AliDropship que agregamos reemplazan valores vacios o antiguos enviados desde el frontend.
-  const map = new Map();
-  for (const item of meta || []) {
-    if (!item || !item.key) continue;
-    const k = String(item.key);
-    const nk = normalizeText(k);
-    map.set(nk, { key: k, value: item.value });
+const regionMaps = { CL: mapsForRegions(regionesChile), CO: mapsForRegions(regionesColombia) };
+// Compatibilidad histórica para partes antiguas del código.
+const regiones = regionesChile;
+const comunas = regionesChile.flatMap((r) => r.comunas || []);
+const comunaMap = chilePostcodeMap;
+const comunaRegionMap = regionMaps.CL.byCity;
+const regionMapByCode = regionMaps.CL.byCode;
+const regionMapByName = regionMaps.CL.byName;
+function getCountryRegions(country = 'CL') { return String(country).toUpperCase() === 'CO' ? regionesColombia : regionesChile; }
+function getCountryPostcode(country = 'CL', city = '', fallback = '') {
+  const c = String(country || 'CL').toUpperCase();
+  if (c === 'CO') {
+    const info = resolveRegionInfoCountry('', city, 'CO');
+    return getColombiaPostcode(city, info.codigo, fallback || process.env.CO_DEFAULT_POSTCODE || '110111');
   }
-  return Array.from(map.values());
+  return getChilePostcode(city, fallback || process.env.DEFAULT_POSTCODE || '8320000');
 }
-
-function buildRutMeta(rutFormatted) {
-  if (!rutFormatted) return [];
-  // v6.8: solo campos esenciales para no llenar WooCommerce con campos personalizados duplicados.
-  return [
-    { key: 'billing_rut', value: rutFormatted },
-    { key: 'shipping_rut', value: rutFormatted },
-    { key: '_billing_rut', value: rutFormatted },
-    { key: '_shipping_rut', value: rutFormatted }
-  ];
-}
-function resolveRegionInfo(regionInput = '', comuna = '') {
+function resolveRegionInfoCountry(regionInput = '', city = '', country = 'CL') {
+  const c = String(country || 'CL').toUpperCase();
+  const maps = regionMaps[c] || regionMaps.CL;
   const raw = String(regionInput || '').trim();
   const codeCandidate = raw.toUpperCase();
-  if (regionMapByCode.has(codeCandidate)) {
-    const r = regionMapByCode.get(codeCandidate);
-    return { codigo: r.codigo, region: r.region };
+  if (codeCandidate && maps.byCode.has(codeCandidate)) {
+    const r = maps.byCode.get(codeCandidate);
+    return { codigo: r.codigo, region: r.region, region_original: r.region_original };
   }
-  const byName = regionMapByName.get(normalizeText(raw));
-  if (byName) return { codigo: byName.codigo, region: byName.region };
-  const byComuna = comunaRegionMap.get(normalizeText(comuna || ''));
-  if (byComuna) return byComuna;
-  return { codigo: raw, region: raw };
+  const byName = maps.byName.get(normalizeText(raw));
+  if (byName) return { codigo: byName.codigo, region: byName.region, region_original: byName.region_original };
+  const byCity = maps.byCity.get(normalizeText(city || ''));
+  if (byCity) return byCity;
+  return { codigo: raw || (c === 'CO' ? 'DC' : ''), region: raw || (c === 'CO' ? 'Bogota D.C.' : '') };
 }
-
-function regionStateValue(info) {
-  if (process.env.CHILE_STATE_FORMAT === 'code') return info.codigo || '';
+function resolveRegionInfo(regionInput = '', comuna = '') { return resolveRegionInfoCountry(regionInput, comuna, 'CL'); }
+function regionStateValue(info, store = null) {
+  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
+  if (st.country === 'CO') return info.codigo || '';
+  if (st.state_format === 'code' || process.env.CHILE_STATE_FORMAT === 'code') return info.codigo || '';
   return normalizeRegionForAli(info.region || info.codigo || '');
 }
 
@@ -550,7 +556,7 @@ async function searchProductsIndex({ q='', category='', sale=false, stock='', li
   if (stock === 'instock') clauses.push(`stock_status = 'instock'`);
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   values.push(Number(limit)); const limitIdx=values.length; values.push(Number(offset)); const offsetIdx=values.length;
-  const { rows } = await pgPool.query(`SELECT payload, count(*) OVER() AS total FROM product_index ${where} ORDER BY updated_at DESC, nombre ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values);
+  const { rows } = await pgPool.query(`SELECT payload, count(*) OVER() AS total FROM product_index ${where} ORDER BY CASE WHEN stock_status = 'instock' THEN 0 ELSE 1 END, nombre ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values);
   return { productos: rows.map(r => r.payload), total: Number(rows[0]?.total || 0), source: 'postgres' };
 }
 async function getVariations(productId, store = resolveStore(currentDefaultStore()), force=false) {
@@ -577,7 +583,7 @@ async function buildProductsPage({ q='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {
   if (q) params.search = q;
   const response = await wc.get('/products', { params });
   const total = Number(response.headers['x-wp-total'] || 0);
-  const normalized = response.data.map((p) => normalizeProduct(p, null, st));
+  const normalized = response.data.map((p) => normalizeProduct(p, null, st)).sort((a,b)=>((b.stock_status === 'instock') - (a.stock_status === 'instock')) || String(a.nombre).localeCompare(String(b.nombre),'es'));
   upsertProductsIndex(normalized).catch((e) => console.warn('[index async]', e.message));
   return { productos: normalized, total: total || (Number(offset) + normalized.length + (normalized.length === Number(limit) ? 1 : 0)), source: 'woocommerce_page' };
 }
@@ -668,7 +674,7 @@ function normalizeCheckout(body, store = resolveStore(currentDefaultStore())) {
   billing.city = ciudad || billing.city; shipping.city = ciudad || shipping.city;
   const safeIncomingMeta = (body.meta_data || []).filter((m)=>['_chatwoot_conversation_id','chatwoot_conversation_id','rivaida_store','rivaida_country'].includes(normalizeText(m?.key||'')));
   const metaData = mergeMetaData([...safeIncomingMeta,{key:'rivaida_store',value:st.id},{key:'rivaida_country',value:st.country},...buildDocumentMeta(documentValue, st)]);
-  return { payment_method: body.payment_method || st.payment_gateway_id || process.env.WOO_FLOW_GATEWAY_ID || 'flow', payment_method_title: body.payment_method_title || st.payment_gateway_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Pago WooCommerce', set_paid:false, status:body.status||'pending', billing, shipping, line_items:(body.line_items||[]).map((i)=>({ product_id:Number(i.product_id), variation_id:i.variation_id?Number(i.variation_id):undefined, quantity:Number(i.quantity) })), shipping_lines:body.shipping_lines||[], customer_note:body.customer_note||'', meta_data:metaData };
+  return { payment_method: body.payment_method || st.payment_gateway_id || process.env.WOO_FLOW_GATEWAY_ID || 'flow', payment_method_title: body.payment_method_title || st.payment_gateway_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Pago WooCommerce', set_paid:false, status:body.status||'pending', billing, shipping, line_items:(body.line_items||[]).map((i)=>({ product_id:Number(i.product_id), variation_id:i.variation_id?Number(i.variation_id):undefined, quantity:Number(i.quantity) })), shipping_lines:body.shipping_lines||[], coupon_lines:(body.coupon_lines||body.coupons||[]).filter(Boolean).map((c)=>({ code:String(c.code||c).trim() })), customer_note:body.customer_note||'', meta_data:metaData };
 }
 async function validateStock(lineItems = [], store = resolveStore(currentDefaultStore())) {
   const wc = wcForStore(store);
@@ -855,6 +861,52 @@ app.get('/categorias', async (req, res, next) => {
       return data.map(c => ({ id: c.id, name: c.name, slug: c.slug, count: c.count })).filter(c => c.name).sort((a,b)=>a.name.localeCompare(b.name,'es'));
     }, req.query.refresh === 'true');
     res.json({ categorias: result.value, cached: result.cached });
+  } catch (error) { next(error); }
+});
+
+
+app.get('/cupones', async (req, res, next) => {
+  try {
+    const st = storeFromReq(req); const wc = wcForStore(st);
+    const search = String(req.query.search || req.query.q || '').trim();
+    const params = { per_page: Math.min(Number(req.query.limit || 50), 100), page: Number(req.query.page || 1), orderby: 'date', order: 'desc' };
+    if (search) params.search = search;
+    const { data } = await wc.get('/coupons', { params });
+    res.json({ store: st.id, country: st.country, cupones: data.map((c)=>({ id:c.id, code:c.code, amount:c.amount, discount_type:c.discount_type, description:c.description, free_shipping:c.free_shipping, minimum_amount:c.minimum_amount, maximum_amount:c.maximum_amount, usage_limit:c.usage_limit, usage_count:c.usage_count, date_expires:c.date_expires, status:c.status || (c.date_expires ? 'con fecha' : 'activo') })) });
+  } catch (error) { next(error); }
+});
+app.get('/cupones/validar', async (req, res, next) => {
+  try {
+    const st = storeFromReq(req); const wc = wcForStore(st);
+    const code = String(req.query.code || '').trim();
+    if (!code) return res.status(400).json({ error: 'Debe indicar codigo de cupon' });
+    const { data } = await wc.get('/coupons', { params: { code, per_page: 1 } });
+    const c = data[0] || null;
+    if (!c) return res.status(404).json({ ok:false, error:'Cupon no encontrado' });
+    res.json({ ok:true, store:st.id, coupon:{ id:c.id, code:c.code, amount:c.amount, discount_type:c.discount_type, description:c.description, free_shipping:c.free_shipping, minimum_amount:c.minimum_amount, maximum_amount:c.maximum_amount, usage_limit:c.usage_limit, usage_count:c.usage_count, date_expires:c.date_expires } });
+  } catch (error) { next(error); }
+});
+app.post('/cupones', async (req, res, next) => {
+  try {
+    const st = storeFromReq(req); const wc = wcForStore(st);
+    const body = req.body || {};
+    const code = String(body.code || '').trim();
+    if (!code) return res.status(400).json({ error:'Codigo de cupon obligatorio' });
+    const payload = {
+      code,
+      discount_type: body.discount_type || 'fixed_cart',
+      amount: String(body.amount || '0'),
+      description: body.description || `Cupon creado desde panel Rivaida ${st.name}`,
+      free_shipping: Boolean(body.free_shipping),
+      individual_use: body.individual_use !== false,
+      usage_limit: body.usage_limit ? Number(body.usage_limit) : undefined,
+      minimum_amount: body.minimum_amount ? String(body.minimum_amount) : undefined,
+      maximum_amount: body.maximum_amount ? String(body.maximum_amount) : undefined,
+      date_expires: body.date_expires || undefined
+    };
+    Object.keys(payload).forEach((k)=>payload[k] === undefined && delete payload[k]);
+    const { data } = await wc.post('/coupons', payload);
+    res.status(201).json({ ok:true, store:st.id, coupon:{ id:data.id, code:data.code, amount:data.amount, discount_type:data.discount_type, description:data.description, free_shipping:data.free_shipping, date_expires:data.date_expires } });
   } catch (error) { next(error); }
 });
 
@@ -1357,5 +1409,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.1 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.2 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

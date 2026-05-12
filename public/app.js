@@ -1,4 +1,4 @@
-// v8.1 UI: tolera tiendas sin credenciales, cambio automatico a tienda configurada y errores visibles.
+// v8.2 UI: cupones, regiones/ciudades CL-CO, códigos postales, stock primero y contraste corregido.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -27,7 +27,9 @@ const state = {
   chatwootReady: false,
   settings: {},
   variationModalProductId: null,
-  autoStoreSwitchKey: null
+  autoStoreSwitchKey: null,
+  coupon: null,
+  coupons: []
 };
 const $ = (id) => document.getElementById(id);
 function currentStore(){ return state.stores.find(s => s.id === state.activeStore) || { id: state.activeStore, country: state.activeStore === 'co' ? 'CO' : 'CL', currency: state.activeStore === 'co' ? 'COP' : 'CLP', document_label: state.activeStore === 'co' ? 'CC / NIT' : 'RUT' }; }
@@ -302,7 +304,7 @@ async function changeStore(storeId) {
   await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); await loadProducts(true);
 }
 async function loadRegiones(force=false) {
-  const key = `regiones_${state.activeStore}_v74`;
+  const key = `regiones_${state.activeStore}_v82`;
   const cached = !force && readLocal(key, 86400000 * 30);
   if (cached) { state.regiones = cached; renderRegionOptions(); return; }
   const data = await api('/regiones'); state.regiones = data.regiones || []; saveLocal(key, state.regiones); renderRegionOptions();
@@ -368,7 +370,7 @@ function selectedShippingLine() {
 }
 function renderRegionOptions() {
   if (!$('billingRegion')) return;
-  $('billingRegion').innerHTML = `<option value="">Seleccione ${currentStore().country === 'CO' ? 'departamento' : 'region'}</option>` + state.regiones.map(r => `<option value="${text(r.codigo)}">${text(r.region)}</option>`).join('');
+  $('billingRegion').innerHTML = `<option value="">Seleccione ${currentStore().country === 'CO' ? 'departamento' : 'región'}</option>` + state.regiones.map(r => `<option value="${text(r.codigo)}">${text(r.region || r.region_original || r.codigo)}</option>`).join('');
 }
 function renderComunas(regionCode, selectedComuna='') {
   const region = state.regiones.find(r => r.codigo === regionCode);
@@ -570,10 +572,10 @@ function bindProductEvents() {
   document.querySelectorAll('[data-open-vars]').forEach(btn => btn.addEventListener('click', () => openVariationModal(btn.dataset.openVars)));
   document.querySelectorAll('[data-refresh-vars]').forEach(btn => btn.addEventListener('click', () => loadVariations(btn.dataset.refreshVars, true).then(renderVariationModal)));
   document.querySelectorAll('[data-more-vars]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.moreVars); p.variationLimit=(p.variationLimit||8)+12; renderProducts(); }));
-  document.querySelectorAll('[data-var-select]').forEach(sel => sel.addEventListener('change', () => { const p=findProduct(sel.dataset.varSelect); p.variationChoices=p.variationChoices||{}; if (sel.value) p.variationChoices[sel.dataset.varName]=sel.value; else delete p.variationChoices[sel.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); renderVariationModal(); }));
-  document.querySelectorAll('[data-var-choice]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varChoice); p.variationChoices=p.variationChoices||{}; p.variationChoices[btn.dataset.varName]=btn.dataset.varValue; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); renderVariationModal(); }));
-  document.querySelectorAll('[data-var-clear]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varClear); p.variationChoices=p.variationChoices||{}; delete p.variationChoices[btn.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v)); if(match)p.selectedVariationId=match.id; renderProducts(); renderVariationModal(); }));
-  document.querySelectorAll('[data-select-var]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.selectVar); p.selectedVariationId=btn.dataset.varId; renderProducts(); renderVariationModal(); }));
+  document.querySelectorAll('[data-var-select]').forEach(sel => sel.addEventListener('change', () => { const p=findProduct(sel.dataset.varSelect); p.variationChoices=p.variationChoices||{}; if (sel.value) p.variationChoices[sel.dataset.varName]=sel.value; else delete p.variationChoices[sel.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v) && isStockValueOk(v)); if(match) p.selectedVariationId=match.id; else delete p.selectedVariationId; renderProducts(); renderVariationModal(); }));
+  document.querySelectorAll('[data-var-choice]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varChoice); p.variationChoices=p.variationChoices||{}; p.variationChoices[btn.dataset.varName]=btn.dataset.varValue; const match=(p.variations||[]).find(v=>variationMatches(p,v) && isStockValueOk(v)); if(match) p.selectedVariationId=match.id; else delete p.selectedVariationId; renderProducts(); renderVariationModal(); }));
+  document.querySelectorAll('[data-var-clear]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.varClear); p.variationChoices=p.variationChoices||{}; delete p.variationChoices[btn.dataset.varName]; const match=(p.variations||[]).find(v=>variationMatches(p,v) && isStockValueOk(v)); if(match) p.selectedVariationId=match.id; else delete p.selectedVariationId; renderProducts(); renderVariationModal(); }));
+  document.querySelectorAll('[data-select-var]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.selectVar); const v=(p.variations||[]).find(x=>String(x.id)===String(btn.dataset.varId)); if(!v || !isStockValueOk(v)){ notifyWarning('Variación sin stock', 'Selecciona una variación disponible.'); return; } p.selectedVariationId=btn.dataset.varId; renderProducts(); renderVariationModal(); }));
   document.querySelectorAll('[data-add]').forEach(btn => btn.addEventListener('click', () => { const p=findProduct(btn.dataset.add); addToCart(p, Math.max(1, Number($(`qty-${p.id}`).value || 1)), getSelectedVariation(p)); }));
   document.querySelectorAll('[data-send]').forEach(btn => btn.addEventListener('click', async () => { const p=findProduct(btn.dataset.send); try { await sendToConversation(p, Math.max(1, Number($(`qty-${p.id}`).value || 1)), getSelectedVariation(p)); } catch(e) { alert(e.message); } }));
 }
@@ -596,7 +598,9 @@ function cartItemImage(item) {
 }
 function renderCart() {
   if (!state.cart.length) { $('cartBox').innerHTML = '<div class="cart-empty">Seleccione productos o variaciones para el pedido.</div>'; return; }
-  const total = state.cart.reduce((s,i)=>s+Number(i.variation?.precio || i.product.precio || 0)*i.quantity,0);
+  const subtotal = state.cart.reduce((s,i)=>s+Number(i.variation?.precio || i.product.precio || 0)*i.quantity,0);
+  const couponAmount = state.coupon ? Number(state.coupon.amount || 0) : 0;
+  const total = state.coupon?.discount_type === 'percent' ? Math.max(0, subtotal - Math.round(subtotal * couponAmount / 100)) : Math.max(0, subtotal - couponAmount);
   $('cartBox').innerHTML = state.cart.map(i => {
     const unit = Number(i.variation?.precio || i.product.precio || 0);
     const img = cartItemImage(i);
@@ -707,6 +711,38 @@ async function loadPanel(force=false) {
     renderClient(); renderOrders();
   } catch(e) { alert(e.message); } finally { $('loadBtn').disabled = false; }
 }
+
+async function validateCoupon() {
+  const code = $('couponCode')?.value?.trim();
+  if (!code) { state.coupon = null; renderCart(); notifyWarning('Ingresa un cupón'); return; }
+  const data = await api(`/cupones/validar?code=${encodeURIComponent(code)}`);
+  state.coupon = data.coupon;
+  renderCart();
+  notifySuccess('Cupón válido', `${data.coupon.code} · ${data.coupon.discount_type} · ${data.coupon.amount}`);
+}
+async function createCoupon() {
+  const code = $('newCouponCode')?.value?.trim();
+  const amount = $('newCouponAmount')?.value?.trim();
+  const discount_type = $('newCouponType')?.value || 'fixed_cart';
+  if (!code || !amount) { notifyWarning('Completa código y monto del cupón'); return; }
+  const payload = { code, amount, discount_type, description: $('newCouponDescription')?.value || '', usage_limit: $('newCouponUsageLimit')?.value || '', free_shipping: $('newCouponFreeShipping')?.checked || false };
+  const data = await api('/cupones', { method:'POST', body: JSON.stringify(payload) });
+  $('couponCode').value = data.coupon.code;
+  state.coupon = data.coupon;
+  renderCart();
+  notifySuccess('Cupón creado', data.coupon.code);
+}
+async function searchCoupons() {
+  const q = $('couponSearch')?.value?.trim() || '';
+  const data = await api(`/cupones?search=${encodeURIComponent(q)}&limit=20`);
+  state.coupons = data.cupones || [];
+  const box = $('couponResults');
+  if (!box) return;
+  box.innerHTML = state.coupons.length ? state.coupons.map(c => `<button type="button" class="coupon-pill" data-use-coupon="${text(c.code)}"><strong>${text(c.code)}</strong><span>${text(c.discount_type)} · ${text(c.amount)}</span></button>`).join('') : '<span class="mini muted-line">Sin cupones encontrados.</span>';
+  box.querySelectorAll('[data-use-coupon]').forEach(btn => btn.addEventListener('click', () => { $('couponCode').value = btn.dataset.useCoupon; validateCoupon().catch(e => notifyError(e.message)); }));
+}
+function clearCoupon() { state.coupon = null; if ($('couponCode')) $('couponCode').value = ''; renderCart(); notifySuccess('Cupón quitado'); }
+
 function buildOrderPayload() {
   const email = $('customerEmail').value.trim();
   const regionCode = $('billingRegion').value;
@@ -738,6 +774,7 @@ function buildOrderPayload() {
     payment_method_title:$('paymentMethod').selectedOptions[0]?.textContent || $('paymentMethod').value,
     shipping_lines: selectedShippingLine() ? [selectedShippingLine()] : [],
     line_items: state.cart.map(i => ({ product_id:i.product.id, variation_id:i.variation?.id, quantity:i.quantity })),
+    coupon_lines: state.coupon ? [{ code: state.coupon.code }] : [],
     customer_note:$('customerNote').value.trim() || 'Pedido creado desde panel Chatwoot.',
     meta_data:[{key:'_chatwoot_conversation_id', value:$('conversationId').value.trim()}]
   };
@@ -1105,7 +1142,7 @@ ${JSON.stringify(data, null, 2)}`);
   }
 }
 
-async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v74`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
+async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v82`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/stores'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('openSettingsBtn')?.addEventListener('click', () => toggleSettings(true));
 $('closeSettingsBtn')?.addEventListener('click', () => toggleSettings(false));
@@ -1151,6 +1188,11 @@ $('searchOrdersBtn')?.addEventListener('click', searchOrders);
 $('clearOrderSearchBtn')?.addEventListener('click', clearOrderSearch);
 $('orderSearchInput')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter') searchOrders(); });
 $('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value).catch(e => notifyError(e.message)));
+
+$('validateCouponBtn')?.addEventListener('click', () => validateCoupon().catch(e => notifyError(e.message)));
+$('clearCouponBtn')?.addEventListener('click', clearCoupon);
+$('createCouponBtn')?.addEventListener('click', () => createCoupon().catch(e => notifyError(e.message)));
+$('searchCouponsBtn')?.addEventListener('click', () => searchCoupons().catch(e => notifyError(e.message)));
 $('closeVariationModalBtn')?.addEventListener('click', closeVariationModal);
 $('variationModalCancelBtn')?.addEventListener('click', closeVariationModal);
 $('variationBackdrop')?.addEventListener('click', closeVariationModal);

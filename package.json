@@ -1,7 +1,7 @@
 {
   "name": "chatwoot-woocommerce-flow-panel",
-  "version": "8.1.0",
-  "description": "Panel Chatwoot WooCommerce multi-pais v8.1 tolerante a credenciales faltantes",
+  "version": "8.2.0",
+  "description": "Panel Chatwoot WooCommerce multi-pais v8.2 cupones regiones ciudades y stock",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
