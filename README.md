@@ -90,16 +90,23 @@ Si tus plugins usan otros IDs, ajustalos en Credenciales dentro del panel.
 - Venta rápida Colombia/Dropi: copia datos del chat, cliente, dirección, productos, pago y total para pegar en plataforma externa.
 
 
-## v7.8 - Pagos y envios Woo automaticos
+## v7.9 - Pagos y envios Woo automaticos
 
 Esta version lee desde WooCommerce los metodos de pago activos y tambien los metodos de envio activos configurados en las zonas de envio. En el checkout del panel el agente selecciona metodo de pago y metodo de envio; al crear el pedido se envia `shipping_lines` a WooCommerce.
 
 Las credenciales ya no necesitan editarse en `.env`: entra al panel, abre **Credenciales**, guarda Woo Chile, Woo Colombia, Chatwoot y Flow. El `.env` queda solo para arrancar el servicio, dominio, Redis/PostgreSQL y usuario del panel.
 
 
-## v7.8
+## v7.9
 
 - Credenciales en modal independiente para no romper la página.
 - Selector de variaciones en modal con bloqueo de opciones sin stock.
 - No permite agregar ni enviar productos/variaciones sin stock.
 - Notificaciones visuales en pantalla para carrito, conexión Chatwoot, credenciales y errores.
+
+
+## v7.9
+- Credenciales en modal con mejor distribución.
+- IA opcional: OpenAI, DeepSeek, Gemini o webhook.
+- Cambio automático de tienda por inbox de Chatwoot, etiquetas o código de país del teléfono (+56 Chile, +57 Colombia).
+- Nuevas variables: CHATWOOT_INBOX_STORE_MAP, CL_CHATWOOT_INBOX_IDS, CO_CHATWOOT_INBOX_IDS, AUTO_STORE_BY_PHONE, AI_PROVIDER, OPENAI_API_KEY, DEEPSEEK_API_KEY, GEMINI_API_KEY.

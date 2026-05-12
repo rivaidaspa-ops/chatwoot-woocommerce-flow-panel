@@ -25,7 +25,8 @@ const state = {
   chatwootContext: null,
   chatwootReady: false,
   settings: {},
-  variationModalProductId: null
+  variationModalProductId: null,
+  autoStoreSwitchKey: null
 };
 const $ = (id) => document.getElementById(id);
 function currentStore(){ return state.stores.find(s => s.id === state.activeStore) || { id: state.activeStore, country: state.activeStore === 'co' ? 'CO' : 'CL', currency: state.activeStore === 'co' ? 'COP' : 'CLP', document_label: state.activeStore === 'co' ? 'CC / NIT' : 'RUT' }; }
@@ -65,6 +66,7 @@ function extractChatwootContext(payload = {}) {
   const appContext = payload.event === 'appContext' ? payload.data : (payload.appContext || payload.data || payload);
   const conversation = appContext.conversation || appContext.currentConversation || appContext;
   const contact = appContext.contact || conversation.contact || conversation.meta?.sender || conversation.sender || appContext.meta?.sender || {};
+  const inboxId = conversation.inbox_id || conversation.inbox?.id || appContext.inbox_id || appContext.inbox?.id || conversation.meta?.inbox_id || conversation.meta?.inbox?.id || conversation.additional_attributes?.inbox_id || '';
   const conversationId = conversation.id || conversation.conversation_id || appContext.conversation_id || appContext.id || '';
   let email = contact.email || conversation.meta?.sender?.email || conversation.contact_email || appContext.email || '';
   if (!email) {
@@ -74,10 +76,50 @@ function extractChatwootContext(payload = {}) {
     }
   }
   const name = contact.name || contact.available_name || conversation.meta?.sender?.name || '';
-  const phone = contact.phone_number || contact.phone || conversation.meta?.sender?.phone_number || '';
+  const phone = contact.phone_number || contact.phone || conversation.meta?.sender?.phone_number || appContext.phone || '';
   const labels = conversation.labels || conversation.label_list || [];
-  const customAttributes = conversation.custom_attributes || {};
-  return { raw: payload, appContext, conversation, contact, conversationId, email, name, phone, labels, customAttributes };
+  const customAttributes = conversation.custom_attributes || contact.custom_attributes || {};
+  return { raw: payload, appContext, conversation, contact, conversationId, inboxId, email, name, phone, labels, customAttributes };
+}
+function splitSettingList(value='') {
+  return String(value || '').split(',').map(x => x.trim()).filter(Boolean);
+}
+function normalizePhoneForCountry(value='') {
+  return String(value || '').replace(/[\s().-]/g, '').trim();
+}
+function inferStoreFromChatwootContext(ctx = {}) {
+  const attrs = ctx.customAttributes || {};
+  const labelText = (ctx.labels || []).map(x => String(x).toLowerCase()).join(' ');
+  const explicit = String(attrs.rivaida_store || attrs.store || attrs.country || '').toLowerCase();
+  if (['cl','chile','56','CL'].map(x=>String(x).toLowerCase()).includes(explicit)) return 'cl';
+  if (['co','colombia','57','CO'].map(x=>String(x).toLowerCase()).includes(explicit)) return 'co';
+  if (/\b(colombia|dropi|co)\b/.test(labelText)) return 'co';
+  if (/\b(chile|cl)\b/.test(labelText)) return 'cl';
+  const inbox = String(ctx.inboxId || '').trim();
+  if (inbox) {
+    try {
+      const map = JSON.parse(state.settings.CHATWOOT_INBOX_STORE_MAP || '{}');
+      const mapped = String(map[inbox] || '').toLowerCase();
+      if (mapped === 'cl' || mapped === 'co') return mapped;
+    } catch {}
+    if (splitSettingList(state.settings.CL_CHATWOOT_INBOX_IDS).includes(inbox)) return 'cl';
+    if (splitSettingList(state.settings.CO_CHATWOOT_INBOX_IDS).includes(inbox)) return 'co';
+  }
+  if (String(state.settings.AUTO_STORE_BY_PHONE || 'true') !== 'false') {
+    const phone = normalizePhoneForCountry(ctx.phone);
+    if (phone.startsWith('+57') || phone.startsWith('57')) return 'co';
+    if (phone.startsWith('+56') || phone.startsWith('56')) return 'cl';
+  }
+  return '';
+}
+function maybeAutoSwitchStoreFromContext(ctx = {}, source='Chatwoot') {
+  const target = inferStoreFromChatwootContext(ctx);
+  if (!target || !state.stores.find(s => s.id === target)) return;
+  const key = `${target}:${ctx.conversationId || ''}:${ctx.inboxId || ''}:${ctx.phone || ''}`;
+  if (state.activeStore === target || state.autoStoreSwitchKey === key) return;
+  state.autoStoreSwitchKey = key;
+  notify('Tienda detectada automáticamente', `${target === 'co' ? 'Colombia' : 'Chile'} por ${ctx.inboxId ? 'bandeja/inbox' : 'código de país'} ${source ? '· ' + source : ''}`);
+  changeStore(target).catch((e) => notifyError('No se pudo cambiar tienda automáticamente', e.message));
 }
 function renderChatwootContext(ctx, source='Chatwoot') {
   state.chatwootContext = ctx;
@@ -89,26 +131,28 @@ function renderChatwootContext(ctx, source='Chatwoot') {
     $('billingFirstName').value = parts.shift() || '';
     if ($('billingLastName') && !$('billingLastName').value) $('billingLastName').value = parts.join(' ');
   }
+  maybeAutoSwitchStoreFromContext(ctx, source);
   const status = $('chatwootContextStatus');
   if (status) status.textContent = ctx?.conversationId ? `Conectado a conversación #${ctx.conversationId}` : 'Contexto recibido sin ID de conversación';
   const box = $('chatwootContextBox');
   if (box) {
     box.className = 'chatwoot-context-box active';
-    box.innerHTML = `<strong>${text(ctx?.name || 'Contacto Chatwoot')}</strong><span>Email: ${text(ctx?.email || 'pendiente / no detectado')}</span><span>Conversación: ${text(ctx?.conversationId || 'N/D')}</span><span>Teléfono: ${text(ctx?.phone || 'N/D')}</span><span>Origen: ${text(source)}</span>${ctx?.labels?.length ? `<span>Etiquetas: ${ctx.labels.map(text).join(', ')}</span>` : ''}`;
+    box.innerHTML = `<strong>${text(ctx?.name || 'Contacto Chatwoot')}</strong><span>Email: ${text(ctx?.email || 'pendiente / no detectado')}</span><span>Conversación: ${text(ctx?.conversationId || 'N/D')}</span><span>Teléfono: ${text(ctx?.phone || 'N/D')}</span><span>Inbox: ${text(ctx?.inboxId || 'N/D')}</span><span>Tienda sugerida: ${text(inferStoreFromChatwootContext(ctx) || state.activeStore)}</span><span>Origen: ${text(source)}</span>${ctx?.labels?.length ? `<span>Etiquetas: ${ctx.labels.map(text).join(', ')}</span>` : ''}`;
   }
 }
 async function enrichContextFromServer(conversationId='') {
   const id = conversationId || $('conversationId')?.value?.trim();
   if (!id) return null;
   const data = await api(`/chatwoot/conversacion/${encodeURIComponent(id)}/contexto`);
-  const ctx = { conversationId: data.conversationId || id, email: data.email || '', name: data.name || '', phone: data.phone || '', labels: data.labels || [], customAttributes: data.custom_attributes || {}, conversation: data.conversation, contact: data.contact };
+  const ctx = { conversationId: data.conversationId || id, inboxId: data.inbox_id || data.conversation?.inbox_id || data.conversation?.inbox?.id || '', email: data.email || '', name: data.name || '', phone: data.phone || '', labels: data.labels || [], customAttributes: data.custom_attributes || {}, conversation: data.conversation, contact: data.contact };
   renderChatwootContext(ctx, data.email_detected_from_message ? 'Chatwoot + email detectado en mensajes' : 'Chatwoot API');
   if (ctx.email && !state.cliente) loadPanel(false).catch(console.warn);
   return ctx;
 }
 function requestChatwootContext() {
   if (window.parent && window.parent !== window) {
-    const status = $('chatwootContextStatus');
+    maybeAutoSwitchStoreFromContext(ctx, source);
+  const status = $('chatwootContextStatus');
     if (status) status.textContent = 'Solicitando contexto a Chatwoot...';
     window.parent.postMessage('chatwoot-dashboard-app:fetch-info', '*');
   }
@@ -973,6 +1017,7 @@ async function loadSettings() {
   const data = await api('/admin/settings');
   state.settings = data.settings || {};
   fillSettingsForm(state.settings);
+  if (state.chatwootContext) maybeAutoSwitchStoreFromContext(state.chatwootContext, 'configuración');
   if ($('settingsStatus')) $('settingsStatus').textContent = data.postgres ? 'Configuración guardada correctamente.' : 'Configuración temporal: revisa la conexión de base de datos.';
 }
 async function saveSettings() {
