@@ -1,7 +1,7 @@
 {
-  "name": "rivaida-commerce-hub",
-  "version": "8.6.10",
-  "description": "Rivaida Commerce Hub - fix conservador DB sin dependencia de columna moneda",
+  "name": "chatwoot-woocommerce-flow-panel",
+  "version": "8.3.1",
+  "description": "Panel Chatwoot WooCommerce multi-pais v8.3.1 rollback estable Colombia/Chile",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

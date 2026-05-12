@@ -1,4 +1,4 @@
-// v8.6.10 Rivaida Commerce Hub: fix conservador DB sin dependencia de columna moneda/currency.
+// v8.1: multitienda tolerante a credenciales faltantes, productos por tienda y mensajes claros.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -11,10 +11,11 @@ const morgan = require('morgan');
 const Redis = require('ioredis');
 const { Pool } = require('pg');
 const FormData = require('form-data');
-const BOOT_ENV = { ...process.env };
 
 const app = express();
-app.set('etag', false);
+app.disable('etag');
+const APP_VERSION = '8.3.1';
+const APP_NAME = 'Rivaida Commerce Hub';
 const PORT = Number(process.env.PORT || 3001);
 const WC_URL = String(process.env.WC_URL || '').replace(/\/$/, '');
 const FLOW_API_URL = String(process.env.FLOW_API_URL || 'https://www.flow.cl/api').replace(/\/$/, '');
@@ -107,21 +108,13 @@ function buildStoreConfig() {
   return merged;
 }
 let STORE_CONFIG = buildStoreConfig();
-function normalizeStoreId(input='') {
-  const raw = String(input || '').trim().toLowerCase();
-  if (['co','colombia','cop','57','+57'].includes(raw)) return 'co';
-  if (['cl','chile','clp','56','+56'].includes(raw)) return 'cl';
-  return raw || 'cl';
-}
-function currentDefaultStore() { return normalizeStoreId(BOOT_ENV.DEFAULT_STORE || getCfg('DEFAULT_STORE','cl')); }
+function normalizeStoreId(input='') { const raw=String(input||'').trim().toLowerCase(); if(['co','colombia','cop','57','+57'].includes(raw)) return 'co'; if(['cl','chile','clp','56','+56'].includes(raw)) return 'cl'; return raw || 'cl'; }
+function currentDefaultStore() { return normalizeStoreId(getCfg('DEFAULT_STORE','cl')); }
 const wcClients = new Map();
 function rebuildRuntimeConfig() { STORE_CONFIG = buildStoreConfig(); wcClients.clear(); allowedOrigins = parseAllowedOrigins(); }
 
 function listStores() { return Object.values(STORE_CONFIG).map((s)=>({ id:s.id, code:s.code, name:s.name, country:s.country, currency:s.currency, document_label:s.document_label, document_type:s.document_type, payment_gateway_id:s.payment_gateway_id, payment_presets:s.payment_presets||[], enabled:Boolean(s.wc_url&&s.wc_key&&s.wc_secret) })); }
-function resolveStore(input='') {
-  const raw = normalizeStoreId(input);
-  return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>normalizeStoreId(s.country || s.code || s.id) === raw) || STORE_CONFIG[currentDefaultStore()] || Object.values(STORE_CONFIG)[0];
-}
+function resolveStore(input='') { const raw=normalizeStoreId(input); return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>normalizeStoreId(s.country || s.code || s.id) === raw) || STORE_CONFIG[currentDefaultStore()] || Object.values(STORE_CONFIG)[0]; }
 function storeFromReq(req) { return resolveStore(req.query.store || req.query.country || req.body?.store_id || req.body?.store || req.body?.country || req.headers['x-store-id'] || currentDefaultStore()); }
 function missingWooFields(st = {}) {
   const missing = [];
@@ -159,16 +152,6 @@ app.use(helmet({ contentSecurityPolicy: false, frameguard: false }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('combined'));
-app.use((req, res, next) => {
-  const noStorePaths = ['/productos', '/categorias', '/stores', '/admin/settings', '/payment-methods', '/shipping-methods', '/diagnostics'];
-  if (noStorePaths.some((p) => req.path === p || req.path.startsWith(p + '/')) || req.path === '/app.js' || req.path === '/styles.css') {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    res.set('Surrogate-Control', 'no-store');
-  }
-  next();
-});
 app.use(cors({
   origin(origin, cb) {
     if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) return cb(null, true);
@@ -184,18 +167,7 @@ const redis = REDIS_URL ? new Redis(REDIS_URL, { maxRetriesPerRequest: 1, lazyCo
 const pgPool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, max: Number(process.env.PG_POOL_MAX || 5) }) : null;
 let dbReady = false;
 let redisReady = false;
-let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
-const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.6.10';
-const appLogs = [];
-function addLog(level, message, data = {}) {
-  const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
-  appLogs.unshift(entry);
-  if (appLogs.length > 200) appLogs.pop();
-  const line = `[${entry.level}] ${entry.message}${entry.store ? ' · ' + entry.store : ''}${entry.detail ? ' · ' + entry.detail : ''}`;
-  if (level === 'error') console.error(line); else if (level === 'warning' || level === 'warn') console.warn(line); else console.log(line);
-}
-
+let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null };
 
 if (redis) redis.connect().then(() => { redisReady = true; console.log('[Redis] conectado'); }).catch((e) => console.warn('[Redis] no conectado:', e.message));
 
@@ -245,12 +217,6 @@ async function cacheDelPrefix(prefix) {
     } catch (e) { console.warn('[Redis del]', e.message); }
   }
 }
-async function cacheDelExact(key) {
-  memoryCache.delete(key);
-  if (redisReady) {
-    try { await redis.del(key); } catch (e) { console.warn('[Redis del exact]', e.message); }
-  }
-}
 async function remember(key, ttlSeconds, factory, force = false) {
   if (!force) { const cached = await cacheGet(key); if (cached) return { value: cached, cached: true }; }
   const value = await factory();
@@ -258,7 +224,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'rivaida-commerce-hub', app_name: APP_NAME, version: APP_VERSION, port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.3.1-stable', app_name: APP_NAME, version: APP_VERSION, port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -433,10 +399,7 @@ async function loadAppSettingsFromDb() {
   try {
     await ensureAppSettingsTable();
     const { rows } = await pgPool.query('SELECT key,value FROM app_settings');
-    for (const row of rows) {
-      if (row.key === 'DEFAULT_STORE' && BOOT_ENV.DEFAULT_STORE) continue;
-      process.env[row.key] = row.value;
-    }
+    for (const row of rows) process.env[row.key] = row.value;
     rebuildRuntimeConfig();
   } catch (e) { console.warn('[Settings load]', e.message); }
 }
@@ -507,29 +470,6 @@ async function productIndexCount(store = currentDefaultStore()) {
   if (!pgPool || !dbReady) return 0;
   try { const st = resolveStore(store); const { rows } = await pgPool.query('SELECT COUNT(*)::int AS count FROM product_index WHERE store_id=$1', [st.id]); return Number(rows[0]?.count || 0); } catch { return 0; }
 }
-
-function getMetaValue(metaData = [], keys = []) {
-  const normalizedKeys = (keys || []).map((k) => normalizeText(k));
-  for (const item of metaData || []) {
-    const key = normalizeText(item?.key || '');
-    if (normalizedKeys.includes(key)) return item?.value || '';
-  }
-  for (const item of metaData || []) {
-    const key = normalizeText(item?.key || '');
-    if (normalizedKeys.some((k) => key.includes(k))) return item?.value || '';
-  }
-  return '';
-}
-
-const RUT_META_KEYS = ['billing_rut','_billing_rut','shipping_rut','_shipping_rut','rut','_rut'];
-const CO_DOCUMENT_META_KEYS = ['billing_document','_billing_document','shipping_document','_shipping_document','billing_cedula','shipping_cedula','billing_nit','shipping_nit','document','cedula','nit'];
-function documentKeysForStore(store) {
-  const st = resolveStore(store?.id || store || currentDefaultStore());
-  if (Array.isArray(st.document_fields) && st.document_fields.length) return Array.from(new Set([...st.document_fields, ...(st.country === 'CL' ? RUT_META_KEYS : CO_DOCUMENT_META_KEYS)]));
-  return st.country === 'CL' ? RUT_META_KEYS : CO_DOCUMENT_META_KEYS;
-}
-function isValidEmail(value='') { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim()); }
-
 function extractMeta(metaData = []) {
   const result = {};
   for (const m of metaData || []) {
@@ -574,42 +514,6 @@ function normalizeProduct(product, variations = null, store = null) {
     variations: Array.isArray(variations) ? variations : undefined
   };
 }
-function normalizeProductForStore(p = {}, store = null) {
-  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
-  return { ...p, store_id: st.id, store: st.id, country: st.country, moneda: st.currency || p.moneda, currency: st.currency || p.currency };
-}
-function payloadBelongsToStore(payload = {}, store = null) {
-  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
-  const products = Array.isArray(payload.productos) ? payload.productos : [];
-  const root = normalizeStoreId(payload.store_id || payload.store || '');
-  if (root && root !== st.id) return false;
-  return !products.some((p) => {
-    const raw = p?.store_id || p?.store || '';
-    const productStore = raw ? normalizeStoreId(raw) : st.id;
-    return productStore && productStore !== st.id;
-  });
-}
-function sanitizeProductsPayloadForStore(payload = {}, store = null) {
-  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
-  const original = Array.isArray(payload.productos) ? payload.productos : [];
-  const clean = original
-    .filter((p) => {
-      const raw = p?.store_id || p?.store || '';
-      const productStore = raw ? normalizeStoreId(raw) : st.id;
-      return !productStore || productStore === st.id;
-    })
-    .map((p) => normalizeProductForStore(p, st));
-  const total = clean.length !== original.length ? clean.length : Number(payload.total || clean.length);
-  return { ...payload, productos: clean, total, store_id: st.id, store: st.id, country: st.country, currency: st.currency };
-}
-async function resolveProductsForStore(params, st) {
-  let found = await searchProductsIndex(params, st);
-  if (!found) {
-    found = await buildProductsPage(params, st);
-    if (params.category || params.sale || params.stock === 'instock') found = filterProductsLocal(found.productos, { ...params, offset: 0 });
-  }
-  return sanitizeProductsPayloadForStore(found || { productos: [], total: 0, source: 'empty' }, st);
-}
 function normalizeVariation(v) {
   return {
     id: v.id,
@@ -625,10 +529,6 @@ function normalizeVariation(v) {
     atributos: (v.attributes || []).filter(a => a && a.name && a.option && !isNoisyAttributeName(a.name)).map((a) => ({ name: a.name, option: a.option })),
     meta: extractMeta(v.meta_data)
   };
-}
-function serverStockSortRank(p = {}) { return p.stock_status === 'instock' ? 0 : 1; }
-function sortProductsForDisplay(a = {}, b = {}) {
-  return serverStockSortRank(a) - serverStockSortRank(b) || String(a.nombre || '').localeCompare(String(b.nombre || ''), 'es');
 }
 function productSearchText(p) {
   return normalizeText([p.nombre, p.sku, ...(p.categorias || []), ...(p.etiquetas || []), ...(p.atributos || []).map(a => `${a.name} ${(a.options || []).join(' ')}`)].join(' '));
@@ -661,7 +561,7 @@ async function searchProductsIndex({ q='', category='', sale=false, stock='', li
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   values.push(Number(limit)); const limitIdx=values.length; values.push(Number(offset)); const offsetIdx=values.length;
   const { rows } = await pgPool.query(`SELECT payload, count(*) OVER() AS total FROM product_index ${where} ORDER BY CASE WHEN stock_status = 'instock' THEN 0 ELSE 1 END, nombre ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values);
-  return { productos: rows.map(r => normalizeProductForStore(r.payload || {}, st)), total: Number(rows[0]?.total || 0), source: 'postgres' };
+  return { productos: rows.map(r => r.payload), total: Number(rows[0]?.total || 0), source: 'postgres' };
 }
 async function getVariations(productId, store = resolveStore(currentDefaultStore()), force=false) {
   const st = resolveStore(store.id || store);
@@ -685,10 +585,9 @@ async function buildProductsPage({ q='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {
   const page = Math.floor(Number(offset || 0) / Number(limit || PRODUCT_PAGE_SIZE)) + 1;
   const params = { per_page: Math.min(Number(limit || PRODUCT_PAGE_SIZE), 100), page, status: 'publish' };
   if (q) params.search = q;
-  if (String(arguments[0]?.stock || '').toLowerCase() === 'instock') params.stock_status = 'instock';
   const response = await wc.get('/products', { params });
   const total = Number(response.headers['x-wp-total'] || 0);
-  const normalized = response.data.map((p) => normalizeProduct(p, null, st)).sort(sortProductsForDisplay);
+  const normalized = response.data.map((p) => normalizeProduct(p, null, st)).sort((a,b)=>((b.stock_status === 'instock') - (a.stock_status === 'instock')) || String(a.nombre).localeCompare(String(b.nombre),'es'));
   upsertProductsIndex(normalized).catch((e) => console.warn('[index async]', e.message));
   return { productos: normalized, total: total || (Number(offset) + normalized.length + (normalized.length === Number(limit) ? 1 : 0)), source: 'woocommerce_page' };
 }
@@ -701,7 +600,6 @@ function filterProductsLocal(products, { q='', category='', sale=false, stock=''
     if (!nq) return true;
     return productSearchText(p).includes(nq);
   });
-  filtered = filtered.sort(sortProductsForDisplay);
   const total = filtered.length;
   return { productos: filtered.slice(Number(offset), Number(offset)+Number(limit)), total, source: 'memory' };
 }
@@ -709,10 +607,9 @@ async function runCatalogSync(store = resolveStore(currentDefaultStore())) {
   const st = resolveStore(store.id || store);
   const wc = wcForStore(st);
   if (syncJob.running) return;
-  addLog('info','Sincronización iniciada',{store:st.id});
   syncJob = { running: true, startedAt: new Date().toISOString(), finishedAt: null, page: 0, total: 0, indexed: 0, error: null };
   try {
-    await cacheDelPrefix(`productos:${st.id}:`);
+    await cacheDelPrefix('productos:');
     let page = 1;
     const perPage = Number(process.env.SYNC_PER_PAGE || 50);
     while (true) {
@@ -727,10 +624,8 @@ async function runCatalogSync(store = resolveStore(currentDefaultStore())) {
       page += 1;
     }
     syncJob.finishedAt = new Date().toISOString();
-    addLog('info','Sincronización terminada',{store:st.id, detail:`${syncJob.indexed} productos`});
   } catch (e) {
     syncJob.error = e.message;
-    addLog('error','Error sincronizando catálogo',{store:st.id, error:e.message});
     syncJob.finishedAt = new Date().toISOString();
   } finally {
     syncJob.running = false;
@@ -768,7 +663,7 @@ function buildDocumentMeta(documentValue, store) {
 }
 function normalizeCheckout(body, store = resolveStore(currentDefaultStore())) {
   const st = resolveStore(store.id || store);
-  const documentValue = String(body.document || body.rut || body.billing?.rut || body.billing?.document || getMetaValue(body.meta_data, documentKeysForStore(st)) || '').trim();
+  const documentValue = String(body.document || body.rut || body.billing?.rut || body.billing?.document || getMetaValue(body.meta_data, RUT_META_KEYS) || '').trim();
   if (st.document_required !== false && st.document_type === 'rut' && !validateRut(documentValue)) { const e = new Error('RUT chileno invalido o faltante'); e.status = 400; throw e; }
   if (st.document_required !== false && st.document_type !== 'rut' && !normalizeDocument(documentValue)) { const e = new Error(`${st.document_label || 'Documento'} faltante`); e.status = 400; throw e; }
   const billing = { ...(body.billing || {}) };
@@ -927,12 +822,18 @@ async function callAiRecommendations(provider, payload, baseRecommendations) {
 app.get('/flow/retorno', (req, res) => res.sendFile(path.join(__dirname, 'public', 'flow-retorno.html')));
 app.post('/flow/confirmacion', (req, res) => res.status(200).send('OK'));
 
-// Servir la interfaz y sus assets antes de proteger las APIs.
-// El panel se sigue autenticando para llamadas API con token o Basic Auth,
-// pero CSS/JS ya no quedan bloqueados cuando se abre con ?panel_token=...
-app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
-
 app.use(authMiddleware);
+
+
+app.use((req, res, next) => {
+  if (/^\/(productos|stores|paises|categorias|payment-methods|shipping-methods|admin\/settings|diagnostics|cache)/.test(req.path)) {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Surrogate-Control', 'no-store');
+  }
+  next();
+});
 
 app.get('/admin/settings', async (req, res) => {
   res.json({ ok:true, settings: readRuntimeSettings(), stores: listStores(), postgres: dbReady, redis: redisReady });
@@ -962,11 +863,7 @@ app.post('/admin/settings/test', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.get('/diagnostics/status', async (req, res) => {
-  const stores = await Promise.all(listStores().map(async (st) => ({ ...st, index_count: await productIndexCount(st.id).catch(() => 0) })));
-  res.json({ ok:true, app_name:APP_NAME, version:APP_VERSION, active_default:currentDefaultStore(), redis:redisReady, postgres:dbReady, cache_items:memoryCache.size, sync:syncJob, stores, chatwoot:{ configured:Boolean((getCfg('CHATWOOT_URL') || '').trim() && (getCfg('CHATWOOT_API_KEY') || '').trim() && (getCfg('CHATWOOT_ACCOUNT_ID') || '').trim()), url:getCfg('CHATWOOT_URL') || '' }, logs:appLogs.slice(0,80) });
-});
-app.get('/diagnostics/logs', (req, res) => res.json({ ok:true, logs:appLogs.slice(0,200) }));
+app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
 
 app.get('/stores', (req,res)=>res.json({ stores:listStores(), default_store:currentDefaultStore() }));
 app.get('/paises', (req,res)=>res.json({ stores:listStores(), default_store:currentDefaultStore() }));
@@ -974,34 +871,21 @@ app.get('/regiones', (req, res) => { const st=storeFromReq(req); res.json({ stor
 app.get('/comunas', (req, res) => { const st=storeFromReq(req); const regs=getCountryRegions(st.country); const region=String(req.query.region||'').toUpperCase(); const selected=regs.find(r=>String(r.codigo).toUpperCase()===region||normalizeText(r.region)===normalizeText(req.query.region||'')); const comunasOut=selected?selected.comunas:regs.flatMap(r=>r.comunas||[]); res.json({ store:st.id, country:st.country, comunas:comunasOut }); });
 app.get('/validar-rut', (req, res) => res.json({ rut: formatRut(req.query.rut || ''), valido: validateRut(req.query.rut || '') }));
 app.get('/cache/status', async (req, res) => res.json({ ok: true, memory_items: memoryCache.size, redis: redisReady, postgres: dbReady, sync: syncJob }));
-app.post('/cache/clear', async (req, res) => { const st = storeFromReq(req); memoryCache.clear(); await cacheDelPrefix('productos:'); await cacheDelPrefix(`productos:${st.id}:`); await cacheDelPrefix('cliente:'); await cacheDelPrefix('variations:'); await cacheDelPrefix('categorias:'); await cacheDelPrefix('payment_methods:'); await cacheDelPrefix('shipping_methods:'); res.json({ ok: true, store: st.id, message: 'Cache limpiado' }); });
-
-async function repairProductIndexSchema(req, res, next) {
-  try {
-    const migrated = await initDb();
-    await cacheDelPrefix('productos:');
-    const stores = await Promise.all(listStores().map(async (st) => ({ id: st.id, country: st.country, currency: st.currency, index_count: await productIndexCount(st.id).catch(() => 0) })));
-    res.json({ ok: true, migrated, version: APP_VERSION, message: 'Esquema product_index revisado. Cache de productos limpiado. Ahora sincronice catalogo por tienda.', stores });
-  } catch (error) { next(error); }
-}
-app.post('/admin/db/repair-product-index', repairProductIndexSchema);
-app.get('/admin/db/repair-product-index', repairProductIndexSchema);
+app.post('/cache/clear', async (req, res) => { memoryCache.clear(); await cacheDelPrefix('productos:'); await cacheDelPrefix('cliente:'); await cacheDelPrefix('variations:'); res.json({ ok: true, message: 'Cache limpiado' }); });
 
 app.get('/cliente', async (req, res, next) => {
   try {
     const email = String(req.query.email || req.query.email_cliente || req.query.customer_email || '').trim().toLowerCase();
-    const st = storeFromReq(req);
-    if (!email || !isValidEmail(email)) {
-      return res.json({ store: st.id, country: st.country, cliente: { nombre: '', email: email || '', telefono: '', rut: '', direccion: {} }, pedidos: [], cached: false, warning: email ? 'Email no valido para consultar WooCommerce' : 'Email no informado' });
-    }
+    if (!email) return res.status(400).json({ error: 'Debe indicar email del cliente' });
     const force = req.query.refresh === 'true';
+    const st = storeFromReq(req);
     const wc = wcForStore(st);
     const result = await remember(`cliente:${st.id}:${email}`, 60, async () => {
       const { data: customers } = await wc.get('/customers', { params: { email, per_page: 1 } });
       const customer = customers[0] || null;
       const { data: orders } = await wc.get('/orders', { params: { search: email, per_page: 30, orderby: 'date', order: 'desc' } });
       const billing = customer?.billing || {};
-      const rutMeta = getMetaValue(customer?.meta_data || [], documentKeysForStore(st)) || '';
+      const rutMeta = getMetaValue(customer?.meta_data || [], RUT_META_KEYS) || '';
       const regionFound = comunaRegionMap.get(normalizeText(billing.city || '')) || null;
       return {
         cliente: customer ? { id: customer.id, nombre: `${customer.first_name || ''} ${customer.last_name || ''}`.trim(), email: customer.email, telefono: billing.phone || '', rut: rutMeta || billing.rut || '', direccion: { ...billing, region_codigo: regionFound?.codigo || billing.state || '', region_nombre: regionFound?.region || billing.state || '' }, meta: extractMeta(customer.meta_data) } : { nombre: '', email, telefono: '', rut: '', direccion: {} },
@@ -1016,7 +900,7 @@ app.get('/cliente', async (req, res, next) => {
           fecha: order.date_created,
           metodo_pago: order.payment_method_title,
           payment_method: order.payment_method,
-          rut: getMetaValue(order.meta_data || [], documentKeysForStore(st)) || '',
+          rut: getMetaValue(order.meta_data || [], RUT_META_KEYS) || '',
           billing: order.billing || {},
           shipping: order.shipping || {},
           productos: order.line_items?.map((item) => ({ id: item.id, product_id: item.product_id, variation_id: item.variation_id, nombre: item.name, cantidad: item.quantity, total: item.total, subtotal: item.subtotal, sku: item.sku, meta: item.meta_data })) || [],
@@ -1037,39 +921,67 @@ app.get('/productos/search', async (req, res, next) => {
     const params = { q: String(req.query.q || '').trim(), category: String(req.query.category || '').trim(), sale: req.query.sale === 'true', stock: String(req.query.stock || ''), limit: Math.min(Number(req.query.limit || PRODUCT_PAGE_SIZE), MAX_PAGE_SIZE), offset: Number(req.query.offset || 0) };
     const st = storeFromReq(req);
     const cacheKey = `productos:${st.id}:search:${hashKey(JSON.stringify({ ...params, store: st.id, v: APP_VERSION }))}`;
-    const force = req.query.refresh === 'true' || req.query.nocache === 'true';
-    let result = await remember(cacheKey, PAGE_CACHE_SECONDS, async () => resolveProductsForStore(params, st), force);
-    let rawPayload = result.value || { productos: [], total: 0, source: 'empty' };
-
-    // Defensa contra cache viejo o contaminado: revisar ANTES de normalizar, porque al normalizar se puede ocultar la mezcla.
-    if (!payloadBelongsToStore(rawPayload, st)) {
-      await cacheDelExact(cacheKey);
-      rawPayload = await resolveProductsForStore(params, st);
-      result = { value: rawPayload, cached: false };
-    }
-    let payload = sanitizeProductsPayloadForStore(rawPayload || { productos: [], total: 0, source: 'empty' }, st);
-
-    const indexCount = await productIndexCount(st.id);
-    // Si hay indice para esta tienda pero el payload quedó vacío por una cache mala, reconstruye desde Postgres/Woo sin cache.
-    if ((!payload.productos || payload.productos.length === 0) && indexCount > 0 && Number(params.offset || 0) === 0) {
-      await cacheDelExact(cacheKey);
-      result = { value: await resolveProductsForStore(params, st), cached: false };
-      payload = sanitizeProductsPayloadForStore(result.value || { productos: [], total: 0, source: 'empty' }, st);
-    }
-
-    res.json({ ...payload, total: Number(payload.total || payload.productos.length || 0), store:st.id, store_id:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count:indexCount, sync:syncJob });
+    const force = req.query.refresh === 'true';
+    const result = await remember(cacheKey, PAGE_CACHE_SECONDS, async () => {
+      let found = await searchProductsIndex(params, st);
+      if (!found) {
+        found = await buildProductsPage(params, st);
+        if (params.category || params.sale || params.stock === 'instock') found = filterProductsLocal(found.productos, { ...params, offset: 0 });
+      }
+      return found;
+    }, force);
+    res.json({ ...result.value, store:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count: await productIndexCount(st.id), sync:syncJob });
   } catch (error) { next(error); }
 });
+
 app.get('/productos/debug', async (req, res, next) => {
   try {
     const st = storeFromReq(req);
+    const index_count = await productIndexCount(st.id);
     let sample = [];
-    let index_count = await productIndexCount(st.id);
     if (pgPool && dbReady) {
       const { rows } = await pgPool.query(`SELECT id,nombre,sku,stock_status,store_id,precio,payload FROM product_index WHERE store_id=$1 ORDER BY CASE WHEN stock_status='instock' THEN 0 ELSE 1 END, nombre ASC LIMIT 8`, [st.id]);
-      sample = rows.map((r) => ({ id:r.id, nombre:r.nombre, sku:r.sku, stock_status:r.stock_status, store_id:r.store_id, precio:r.precio, currency:st.currency, payload_store:r.payload?.store_id || '', payload_country:r.payload?.country || '' }));
+      sample = rows.map((r) => ({ id:r.id, nombre:r.nombre, sku:r.sku, stock_status:r.stock_status, store_id:r.store_id, precio:r.precio, payload_store:r.payload?.store_id || '', payload_country:r.payload?.country || '' }));
     }
-    res.json({ ok:true, version:APP_VERSION, store:st.id, country:st.country, currency:st.currency, enabled:Boolean(st.wc_url && st.wc_key && st.wc_secret), index_count, sample, sync:syncJob, note:'Si index_count es mayor que 0 y /productos/search sale vacio, el problema era cache viejo o mezcla de tienda.' });
+    res.json({ ok:true, version:APP_VERSION, store:st.id, country:st.country, currency:st.currency, enabled:Boolean(st.wc_url && st.wc_key && st.wc_secret), index_count, sample, sync:syncJob });
+  } catch (error) { next(error); }
+});
+
+app.post('/admin/db/clear-product-index', async (req, res, next) => {
+  try {
+    if (!pgPool || !dbReady) return res.status(500).json({ error:'Postgres no disponible' });
+    const st = storeFromReq(req);
+    const all = String(req.query.all || req.body?.all || '').toLowerCase() === 'true';
+    let deleted = 0;
+    if (all) {
+      const r = await pgPool.query('DELETE FROM product_index');
+      deleted = r.rowCount || 0;
+    } else {
+      const r = await pgPool.query('DELETE FROM product_index WHERE store_id=$1', [st.id]);
+      deleted = r.rowCount || 0;
+    }
+    memoryCache.clear();
+    await cacheDelPrefix('productos:');
+    res.json({ ok:true, version:APP_VERSION, cleared: all ? 'all' : st.id, deleted, message:'Índice de productos borrado. Ahora sincroniza catálogo para reconstruirlo.' });
+  } catch (error) { next(error); }
+});
+
+app.get('/admin/db/clear-product-index', async (req, res, next) => {
+  try {
+    if (!pgPool || !dbReady) return res.status(500).json({ error:'Postgres no disponible' });
+    const st = storeFromReq(req);
+    const all = String(req.query.all || '').toLowerCase() === 'true';
+    let deleted = 0;
+    if (all) {
+      const r = await pgPool.query('DELETE FROM product_index');
+      deleted = r.rowCount || 0;
+    } else {
+      const r = await pgPool.query('DELETE FROM product_index WHERE store_id=$1', [st.id]);
+      deleted = r.rowCount || 0;
+    }
+    memoryCache.clear();
+    await cacheDelPrefix('productos:');
+    res.json({ ok:true, version:APP_VERSION, cleared: all ? 'all' : st.id, deleted, message:'Índice de productos borrado. Ahora sincroniza catálogo para reconstruirlo.' });
   } catch (error) { next(error); }
 });
 
@@ -1466,8 +1378,7 @@ function normalizeConversationContext(conversation = {}) {
 async function getConversationLabels(client, conversationId) {
   try {
     const { data } = await client.get(`/conversations/${conversationId}/labels`);
-    const arr = Array.isArray(data?.payload) ? data.payload : (Array.isArray(data) ? data : []);
-    return arr.map((x) => typeof x === 'string' ? x : (x.title || x.name || x.label || '')).filter(Boolean).map(cleanLabel);
+    return Array.isArray(data?.payload) ? data.payload : (Array.isArray(data) ? data : []);
   } catch { return []; }
 }
 function cleanLabel(label='') {
@@ -1488,32 +1399,17 @@ const DEFAULT_CHATWOOT_ATTRIBUTES = [
   { attribute_display_name:'Rivaida ultimo producto', attribute_key:'rivaida_ultimo_producto', attribute_description:'Ultimo producto enviado al chat', attribute_display_type:0, attribute_model:0 },
   { attribute_display_name:'Rivaida ultimo SKU', attribute_key:'rivaida_ultimo_sku', attribute_description:'SKU del ultimo producto enviado', attribute_display_type:0, attribute_model:0 },
   { attribute_display_name:'Rivaida carrito total', attribute_key:'rivaida_carrito_total', attribute_description:'Total estimado del carrito', attribute_display_type:1, attribute_model:0 },
-  { attribute_display_name:'Rivaida rut validado', attribute_key:'rivaida_rut_validado', attribute_description:'RUT validado desde el panel', attribute_display_type:7, attribute_model:0 },
-  { attribute_display_name:'Rivaida tienda', attribute_key:'rivaida_store', attribute_description:'Tienda/pais activo: cl o co', attribute_display_type:0, attribute_model:0 },
-  { attribute_display_name:'Rivaida pais', attribute_key:'rivaida_country', attribute_description:'Codigo de pais CL o CO', attribute_display_type:0, attribute_model:0 },
-  { attribute_display_name:'Rivaida metodo pago', attribute_key:'rivaida_metodo_pago', attribute_description:'Metodo de pago elegido', attribute_display_type:0, attribute_model:0 },
-  { attribute_display_name:'Rivaida metodo envio', attribute_key:'rivaida_metodo_envio', attribute_description:'Metodo de envio elegido', attribute_display_type:0, attribute_model:0 }
+  { attribute_display_name:'Rivaida rut validado', attribute_key:'rivaida_rut_validado', attribute_description:'RUT validado desde el panel', attribute_display_type:7, attribute_model:0 }
 ];
 
 async function sendChatwootProductMessage(client, conversationId, content, img, privateNote, contentAttributes) {
   const wantsAttachment = img && getCfg('CHATWOOT_SEND_IMAGE_ATTACHMENT','true') !== 'false';
   if (wantsAttachment) {
     try {
-      const maxBytes = Number(getCfg('IMAGE_MAX_BYTES','4500000'));
-      const allowed = String(getCfg('CHATWOOT_ALLOWED_IMAGE_MIME','image/jpeg,image/png')).split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
-      const imageResp = await axios.get(img, {
-        responseType: 'arraybuffer',
-        timeout: Number(getCfg('IMAGE_FETCH_TIMEOUT_MS','15000')),
-        maxContentLength: maxBytes,
-        headers: { 'User-Agent': 'Rivaida-Commerce-Hub/8.5', 'Accept': 'image/jpeg,image/png,image/*;q=0.8,*/*;q=0.5' }
-      });
-      const mime = String(imageResp.headers['content-type'] || 'image/jpeg').split(';')[0].toLowerCase();
-      const size = Number(imageResp.data?.byteLength || 0);
+      const imageResp = await axios.get(img, { responseType: 'arraybuffer', timeout: Number(getCfg('IMAGE_FETCH_TIMEOUT_MS','15000')), maxContentLength: Number(getCfg('IMAGE_MAX_BYTES','8000000')) });
+      const mime = String(imageResp.headers['content-type'] || 'image/jpeg').split(';')[0];
       if (!mime.startsWith('image/')) throw new Error(`La URL no retorno imagen valida: ${mime}`);
-      if (!allowed.includes(mime)) throw new Error(`Formato ${mime} no adjuntado para WhatsApp; se envia enlace. Use JPG/PNG para evitar error 131053.`);
-      if (size > maxBytes) throw new Error(`Imagen demasiado pesada (${size} bytes); se envia enlace para evitar error 131053.`);
-      const ext = mime.includes('png') ? 'png' : 'jpg';
-      const filename = `producto-${Date.now()}.${ext}`;
+      const filename = `producto-${Date.now()}.${mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg'}`;
       const form = new FormData();
       form.append('content', content);
       form.append('message_type', 'outgoing');
@@ -1521,14 +1417,13 @@ async function sendChatwootProductMessage(client, conversationId, content, img, 
       form.append('content_type', 'text');
       form.append('content_attributes', JSON.stringify(contentAttributes || {}));
       form.append('attachments[]', Buffer.from(imageResp.data), { filename, contentType: mime });
-      const { data } = await client.post(`/conversations/${conversationId}/messages`, form, { headers: form.getHeaders(), maxBodyLength: maxBytes + 1000000 });
+      const { data } = await client.post(`/conversations/${conversationId}/messages`, form, { headers: form.getHeaders() });
       return { data, sentAsAttachment: true, imageFallback: false };
     } catch (e) {
-      addLog('warning','Imagen no adjuntada; se envia enlace seguro',{detail:e.response?.data ? JSON.stringify(e.response.data).slice(0,180) : e.message});
       console.warn('[Chatwoot imagen adjunta] fallback texto:', e.response?.data || e.message);
     }
   }
-  const fallbackContent = [content, img ? `Imagen del producto: ${img}` : ''].filter(Boolean).join('\n');
+  const fallbackContent = [content, img ? `Imagen: ${img}` : ''].filter(Boolean).join('\n');
   const { data } = await client.post(`/conversations/${conversationId}/messages`, {
     content: fallbackContent,
     message_type: 'outgoing',
@@ -1545,7 +1440,6 @@ app.post('/chatwoot/enviar-producto', async (req, res, next) => {
   try {
     const client = chatwootClient();
     if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
-    const st = storeFromReq(req);
     const { conversationId, product, variation, quantity = 1, privateNote = false, imageUrl = '', autoLabels = true, custom_attributes = {} } = req.body;
     if (!conversationId || !product?.nombre) return res.status(400).json({ error: 'conversationId y producto son obligatorios' });
     const price = variation?.precio || product.precio || 0;
@@ -1555,19 +1449,18 @@ app.post('/chatwoot/enviar-producto', async (req, res, next) => {
       `Producto: ${product.nombre}`,
       attrs ? `Variacion: ${attrs}` : '',
       `SKU: ${variation?.sku || product.sku || 'N/D'}`,
-      `Precio: ${Number(price || 0).toLocaleString(st.country === 'CO' ? 'es-CO' : 'es-CL')} ${st.currency || 'CLP'}`,
+      `Precio: $${Number(price || 0).toLocaleString('es-CL')} CLP`,
       `Cantidad sugerida: ${quantity}`,
       product.permalink ? `Link: ${product.permalink}` : ''
     ].filter(Boolean).join('\n');
-    const mediaResult = await sendChatwootProductMessage(client, conversationId, content, img, privateNote, { product_id: product.id, variation_id: variation?.id || undefined, sku: variation?.sku || product.sku || '', price: Number(price || 0), store_id: st.id, country: st.country });
+    const mediaResult = await sendChatwootProductMessage(client, conversationId, content, img, privateNote, { product_id: product.id, variation_id: variation?.id || undefined, sku: variation?.sku || product.sku || '', price: Number(price || 0) });
     if (autoLabels) {
       const existing = await getConversationLabels(client, conversationId);
       await client.post(`/conversations/${conversationId}/labels`, { labels: Array.from(new Set([...existing, 'rivaida_interesado', 'rivaida_producto_enviado'])) });
     }
-    const attrsPayload = { rivaida_estado: 'producto_enviado', rivaida_store: st.id, rivaida_country: st.country, rivaida_ultimo_producto: product.nombre, rivaida_ultimo_sku: variation?.sku || product.sku || '', rivaida_ultima_imagen: img || '', ...custom_attributes };
+    const attrsPayload = { rivaida_estado: 'producto_enviado', rivaida_ultimo_producto: product.nombre, rivaida_ultimo_sku: variation?.sku || product.sku || '', rivaida_ultima_imagen: img || '', ...custom_attributes };
     try { await client.post(`/conversations/${conversationId}/custom_attributes`, { custom_attributes: attrsPayload }); } catch (e) { console.warn('[Chatwoot atributos envio]', e.response?.data || e.message); }
-    addLog('info','Producto enviado a Chatwoot',{store:st.id, detail: mediaResult.sentAsAttachment ? 'imagen adjunta' : 'fallback texto'});
-    res.json({ ok: true, store: st.id, country: st.country, message: mediaResult.sentAsAttachment ? 'Producto enviado a Chatwoot con imagen adjunta' : 'Producto enviado a Chatwoot con enlace de imagen', image_sent_as_attachment: mediaResult.sentAsAttachment, image_fallback_url: mediaResult.imageFallback, imageUrl: img });
+    res.json({ ok: true, message: mediaResult.sentAsAttachment ? 'Producto enviado a Chatwoot con imagen adjunta' : 'Producto enviado a Chatwoot con enlace de imagen', image_sent_as_attachment: mediaResult.sentAsAttachment, image_fallback_url: mediaResult.imageFallback, imageUrl: img });
   } catch (error) { next(error); }
 });
 
@@ -1662,9 +1555,7 @@ app.use((req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
 app.use((error, req, res, next) => {
   console.error('[ERROR]', error.response?.data || error.message);
   const status = error.status || error.response?.status || 500;
-  const msg = formatWooError(error);
-  const dbSchemaHint = error.code === '42703' || /columna .* no existe|column .* does not exist/i.test(String(msg));
-  res.status(status).json({ error: msg, status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')), db_schema_hint: dbSchemaHint ? 'Reinicie/deploy para ejecutar migraciones automáticas de product_index. Si persiste, vacie/sincronice indice rapido.' : undefined });
+  res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v${APP_VERSION} activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`${APP_NAME} v${APP_VERSION} activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

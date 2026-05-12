@@ -1,4 +1,4 @@
-// v8.6.9 Rivaida Commerce Hub: tienda automatica, aislamiento Colombia/Chile y cache de productos seguro.
+// v8.3.1 UI estable: base v8.3 con cache/debug y deteccion segura por pais.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -23,7 +23,6 @@ const state = {
   themeAccent: localStorage.getItem('panelThemeAccent') || 'teal',
   orderSearchResults: [],
   recommendations: null,
-  uiLogs: [],
   chatwootContext: null,
   chatwootReady: false,
   settings: {},
@@ -38,17 +37,7 @@ const money = (v) => `${Number(v || 0).toLocaleString(currentStore().country ===
 const text = (v) => String(v ?? '').replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
 const normalize = (s='') => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 
-function pushUiLog(level, message, detail='') {
-  const entry = { time: new Date().toISOString(), level, message: String(message || ''), detail: String(detail || ''), store: state.activeStore };
-  state.uiLogs.unshift(entry);
-  state.uiLogs = state.uiLogs.slice(0, 80);
-  try { localStorage.setItem('rivaidaHubLogs', JSON.stringify(state.uiLogs)); } catch {}
-}
-function readUiLogs() {
-  try { state.uiLogs = JSON.parse(localStorage.getItem('rivaidaHubLogs') || '[]'); } catch { state.uiLogs = []; }
-}
 function notify(message, type='info', detail='') {
-  pushUiLog(type, message, detail);
   const host = $('toastHost');
   const msg = String(message || '');
   if (!host) { console.log(`[${type}]`, msg, detail); return; }
@@ -76,7 +65,6 @@ function extractEmailFromString(value='') {
   const match = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return match ? match[0].toLowerCase() : '';
 }
-function isValidEmailLocal(value='') { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim()); }
 function extractChatwootContext(payload = {}) {
   const appContext = payload.event === 'appContext' ? payload.data : (payload.appContext || payload.data || payload);
   const conversation = appContext.conversation || appContext.currentConversation || appContext;
@@ -102,32 +90,12 @@ function splitSettingList(value='') {
 function normalizePhoneForCountry(value='') {
   return String(value || '').replace(/[\s().-]/g, '').trim();
 }
-function phonePrefixForStore(store = currentStore()) { return (store.country === 'CO' || store.id === 'co') ? '+57' : '+56'; }
-function applyCountryCodeToPhone(value = '', store = currentStore()) {
-  let raw = String(value || '').trim();
-  if (!raw) return '';
-  raw = raw.replace(/[\s().-]/g, '');
-  if (raw.startsWith('+')) return raw;
-  if (raw.startsWith('00')) return '+' + raw.slice(2);
-  if (raw.startsWith('56') || raw.startsWith('57')) return '+' + raw;
-  return phonePrefixForStore(store) + raw.replace(/^0+/, '');
-}
-function formatBillingPhoneInPlace() { const el = $('billingPhone'); if (el && el.value.trim()) el.value = applyCountryCodeToPhone(el.value, currentStore()); }
-function normalizeStoreIdClient(value='') {
-  const raw = String(value || '').trim().toLowerCase();
-  if (['co','colombia','cop','57','+57'].includes(raw)) return 'co';
-  if (['cl','chile','clp','56','+56'].includes(raw)) return 'cl';
-  return raw;
-}
-function isTemplateValue(value='') {
-  return /{{|}}/.test(String(value || ''));
-}
 function inferStoreFromChatwootContext(ctx = {}) {
   const attrs = ctx.customAttributes || {};
   const labelText = (ctx.labels || []).map(x => String(x).toLowerCase()).join(' ');
-  const explicit = normalizeStoreIdClient(attrs.rivaida_store || attrs.store || attrs.country || '');
-  if (explicit === 'cl') return 'cl';
-  if (explicit === 'co') return 'co';
+  const explicit = String(attrs.rivaida_store || attrs.store || attrs.country || '').toLowerCase();
+  if (['cl','chile','56','CL'].map(x=>String(x).toLowerCase()).includes(explicit)) return 'cl';
+  if (['co','colombia','57','CO'].map(x=>String(x).toLowerCase()).includes(explicit)) return 'co';
   if (/\b(colombia|dropi|co)\b/.test(labelText)) return 'co';
   if (/\b(chile|cl)\b/.test(labelText)) return 'cl';
   const inbox = String(ctx.inboxId || '').trim();
@@ -160,7 +128,7 @@ function renderChatwootContext(ctx, source='Chatwoot') {
   state.chatwootContext = ctx;
   if (ctx?.conversationId && $('conversationId')) $('conversationId').value = ctx.conversationId;
   if (ctx?.email && $('customerEmail')) $('customerEmail').value = ctx.email;
-  if (ctx?.phone && $('billingPhone') && !$('billingPhone').value) $('billingPhone').value = applyCountryCodeToPhone(ctx.phone, currentStore());
+  if (ctx?.phone && $('billingPhone') && !$('billingPhone').value) $('billingPhone').value = ctx.phone;
   if (ctx?.name && $('billingFirstName') && !$('billingFirstName').value) {
     const parts = String(ctx.name).trim().split(/\s+/);
     $('billingFirstName').value = parts.shift() || '';
@@ -214,22 +182,14 @@ function readUrlParams() {
   const p = new URLSearchParams(location.search);
   const token = p.get('panel_token') || p.get('token') || '';
   if (token) { state.panelToken = token; localStorage.setItem('panelToken', token); }
-  let email = p.get('email') || p.get('email_cliente') || p.get('customer_email') || p.get('contact_email') || '';
-  let conversationId = p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '';
-  let phone = p.get('phone') || p.get('phone_number') || p.get('telefono') || p.get('whatsapp') || '';
-  let inboxId = p.get('inbox_id') || p.get('inboxId') || p.get('inbox.id') || '';
-  if (isTemplateValue(email)) email = '';
-  if (isTemplateValue(conversationId)) conversationId = '';
-  if (isTemplateValue(phone)) phone = '';
-  if (isTemplateValue(inboxId)) inboxId = '';
-  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) email = '';
-  const explicitStore = p.get('store') || p.get('country') || p.get('rivaida_store') || '';
-  const labels = (p.get('labels') || p.get('tags') || '').split(',').map(x => x.trim()).filter(Boolean);
+  const rawEmail = p.get('email') || p.get('email_cliente') || p.get('customer_email') || p.get('contact_email') || '';
+  const rawConversationId = p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '';
+  const isPlaceholder = (v='') => /\{\{|\}\}/.test(String(v || ''));
+  const email = isPlaceholder(rawEmail) ? '' : rawEmail;
+  const conversationId = isPlaceholder(rawConversationId) ? '' : rawConversationId;
   if (email && $('customerEmail')) $('customerEmail').value = email;
   if (conversationId && $('conversationId')) $('conversationId').value = conversationId;
-  if (email || conversationId || phone || inboxId || explicitStore || labels.length) {
-    renderChatwootContext({ email, conversationId, name: '', phone, inboxId, labels, customAttributes: explicitStore ? { rivaida_store: explicitStore } : {} }, 'URL');
-  }
+  if (email || conversationId) renderChatwootContext({ email, conversationId, name: '', phone: '', labels: [], customAttributes: {} }, 'URL');
 }
 function authHeaders() {
   const headers = { 'Content-Type': 'application/json' };
@@ -238,12 +198,9 @@ function authHeaders() {
   return headers;
 }
 function pathWithStore(path) {
-  if (!path.startsWith('/') || path.startsWith('/stores') || path.startsWith('/paises') || path.startsWith('/health') || path.startsWith('/diagnostics')) return path;
-  const [base, qs=''] = path.split('?');
-  const params = new URLSearchParams(qs);
-  params.set('store', state.activeStore);
-  if (base.startsWith('/productos')) params.set('_ts', String(Date.now()));
-  return `${base}?${params.toString()}`;
+  if (!path.startsWith('/') || path.startsWith('/stores') || path.startsWith('/paises') || path.startsWith('/health')) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}store=${encodeURIComponent(state.activeStore)}`;
 }
 function bodyWithStore(options = {}) {
   if (!options.body || typeof options.body !== 'string') return options.body;
@@ -275,7 +232,7 @@ function readLocal(key, maxAgeMs) { try { const raw = JSON.parse(localStorage.ge
 async function enterApp() {
   showApp();
   await loadSettings().catch(()=>{});
-  await loadStores(); addHelpBubbles();
+  await loadStores();
   await loadRegiones();
   await loadCategorias();
   await loadPaymentMethods();
@@ -306,20 +263,16 @@ function configuredStoreNotice() {
 async function loadStores() {
   try {
     const data = await api('/stores'); state.stores = data.stores || [];
-    const urlStore = new URLSearchParams(location.search).get('store') || '';
-    const savedStore = localStorage.getItem('activeStore') || '';
-    const contextStore = state.chatwootContext ? inferStoreFromChatwootContext(state.chatwootContext) : '';
-    const wanted = urlStore || contextStore || savedStore || firstEnabledStoreId() || 'cl';
-    const exists = state.stores.find(s => s.id === wanted);
-    state.activeStore = exists ? wanted : (firstEnabledStoreId() || state.stores[0]?.id || 'cl');
-    if (!isStoreEnabled(state.activeStore)) {
+    const exists = state.stores.find(s => s.id === state.activeStore);
+    if (!exists) state.activeStore = data.default_store || firstEnabledStoreId() || state.stores[0]?.id || 'cl';
+    if (exists && !exists.enabled) {
       const fallback = firstEnabledStoreId();
       if (fallback && fallback !== state.activeStore) {
         state.activeStore = fallback;
+        localStorage.setItem('activeStore', state.activeStore);
         notifyWarning('Tienda sin credenciales', `Se abrió ${currentStore().name || state.activeStore} porque la tienda anterior no tiene WooCommerce configurado.`);
       }
     }
-    localStorage.setItem('activeStore', state.activeStore);
     const sel = $('storeSelect');
     if (sel) {
       sel.innerHTML = state.stores.map(s => `<option value="${text(s.id)}">${text(s.name || s.id)} · ${text(s.country || s.code || '')}${s.enabled ? '' : ' · falta configurar'}</option>`).join('');
@@ -332,30 +285,16 @@ function applyStoreUI() {
   const st = currentStore();
   if ($('brandMark')) $('brandMark').textContent = st.country || st.id.toUpperCase();
   if ($('checkoutTitle')) $('checkoutTitle').textContent = st.country === 'CO' ? 'Checkout Colombia' : 'Checkout Chile';
-  if ($('countryPill')) $('countryPill').textContent = `${st.currency || ''} · ${st.country === 'CO' ? 'Woo Colombia' : 'Woo Chile'}`;
-  if ($('platformPill')) $('platformPill').textContent = st.country === 'CO' ? 'Colombia' : 'Chile';
+  if ($('countryPill')) $('countryPill').textContent = `${st.currency || ''} · ${st.country === 'CO' ? 'Dropi / Wompi / Bold / COD' : 'WooCommerce Flow'}`;
+  if ($('platformPill')) $('platformPill').textContent = st.country === 'CO' ? 'Dropi Colombia' : 'WooCommerce';
   if ($('billingRut')) $('billingRut').placeholder = st.country === 'CO' ? 'Documento: CC / NIT' : 'RUT: 12.345.678-9';
-  if ($('docHelp')) $('docHelp').innerHTML = st.country === 'CO' ? 'Documento CC / NIT para WooCommerce Colombia. Ciudad y departamento quedan aislados de Chile.' : 'RUT chileno en campos esenciales: billing_rut y shipping_rut.';
+  if ($('docHelp')) $('docHelp').innerHTML = st.country === 'CO' ? 'Documento compatible con WooCommerce/Dropi. El departamento se envia como codigo Dropi.' : 'El RUT se guarda en campos esenciales: billing_rut y shipping_rut.';
   if ($('billingPhone')) $('billingPhone').placeholder = st.country === 'CO' ? 'Telefono +57' : 'Telefono +56';
-  if ($('assistantCountryPill')) $('assistantCountryPill').textContent = st.country === 'CO' ? 'CO · Colombia' : 'CL · Chile';
-  if ($('recommendationBox') && !state.recommendations) {
-    $('recommendationBox').innerHTML = st.country === 'CO'
-      ? 'Asistente Colombia independiente: CC/NIT, ciudad/departamento, COP, métodos Woo y envíos disponibles.'
-      : 'Asistente Chile independiente: RUT, región/comuna, CLP, Flow/Woo y despacho local.';
-  }
-  document.body.classList.remove('store-cl','store-co');
-  document.body.classList.add(`store-${st.id}`);
 }
 async function changeStore(storeId) {
   state.activeStore = storeId || 'cl'; localStorage.setItem('activeStore', state.activeStore);
-  if ($('storeSelect')) $('storeSelect').value = state.activeStore;
-  pushUiLog('info', 'Cambio de tienda', state.activeStore === 'co' ? 'Colombia' : 'Chile');
-  state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.shippingMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null; state.selectedOrder=null; state.recommendations=null; state.coupon=null; state.regiones=[];
-  if ($('billingRegion')) $('billingRegion').innerHTML = '<option value="">Cargando...</option>';
-  if ($('billingComuna')) $('billingComuna').innerHTML = '<option value="">Seleccione primero</option>';
-  if ($('billingPostcode')) $('billingPostcode').value = '';
-  if ($('stockFilter')) $('stockFilter').value = '';
-  applyStoreUI(); renderCart(); renderOrders([]); if ($('productsList')) $('productsList').innerHTML = `<div class="store-switch-state"><strong>${text(currentStore().name || state.activeStore)}</strong><p>Cargando catálogo separado para esta tienda...</p></div>`;
+  state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null;
+  applyStoreUI(); renderCart(); renderOrders([]);
   if (!isStoreEnabled(state.activeStore)) {
     const st = currentStore();
     notifyWarning('WooCommerce no configurado', `${st.name || st.id} no tiene credenciales. Puedes seguir usando otra tienda configurada.`);
@@ -368,7 +307,7 @@ async function changeStore(storeId) {
   await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); await loadProducts(true);
 }
 async function loadRegiones(force=false) {
-  const key = `regiones_${state.activeStore}_v86`;
+  const key = `regiones_${state.activeStore}_v831`;
   const cached = !force && readLocal(key, 86400000 * 30);
   if (cached) { state.regiones = cached; renderRegionOptions(); return; }
   const data = await api('/regiones'); state.regiones = data.regiones || []; saveLocal(key, state.regiones); renderRegionOptions();
@@ -520,18 +459,6 @@ function isStockValueOk(item) {
   if (item.manage_stock && item.stock !== null && item.stock !== undefined && Number(item.stock) <= 0) return false;
   return true;
 }
-function productHasAvailableStock(product) {
-  if (!product) return false;
-  if (product.type === 'variable') {
-    if (Array.isArray(product.variations) && product.variations.length) return product.variations.some(isStockValueOk);
-    return isStockValueOk(product);
-  }
-  return isStockValueOk(product);
-}
-function stockSortRank(product) { return productHasAvailableStock(product) ? 0 : 1; }
-function sortProductsByStockThenName(a, b) {
-  return stockSortRank(a) - stockSortRank(b) || String(a.nombre || '').localeCompare(String(b.nombre || ''), 'es');
-}
 function canAddProduct(product, variation=null) {
   if (!product) return { ok: false, reason: 'Producto no encontrado' };
   if (product.type === 'variable') {
@@ -581,13 +508,10 @@ function renderProductCard(p) {
   const img = productImage(p);
   const price = current?.precio || p.precio;
   const can = canAddProduct(p, current);
-  const available = productHasAvailableStock(p);
+  const stockOk = can.ok;
   const typeText = p.type === 'variable' ? 'Producto variable' : 'Producto simple';
   const disabled = can.ok ? '' : 'disabled';
-  const stockLabel = available ? (p.type === 'variable' && !can.ok ? 'Variaciones disponibles' : 'Con stock') : 'Sin stock';
-  const actionLabel = can.ok ? 'Agregar' : (p.type === 'variable' && available ? 'Elige variación' : 'Sin stock');
-  const warning = !can.ok ? (available && p.type === 'variable' ? 'Selecciona una variación disponible para agregar o enviar.' : can.reason) : '';
-  return `<article class="product-card ${available ? '' : 'out-of-stock'}" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${available ? 'ok' : 'no'}">${stockLabel}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(current?.sku || p.sku)} · ${typeText}${p.variation_count ? ` · ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div>${renderVariationPanel(p)}${warning ? `<div class="stock-warning">${text(warning)}</div>` : ''}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1" ${disabled}/><button data-add="${p.id}" ${disabled}>${actionLabel}</button><button class="secondary" data-send="${p.id}" ${disabled}>Enviar a conversación</button></div></div></article>`;
+  return `<article class="product-card ${can.ok ? '' : 'out-of-stock'}" data-product-card="${p.id}"><div class="product-media">${img ? `<img id="main-img-${p.id}" src="${text(img)}" loading="lazy" alt="${text(p.nombre)}"/>` : `<div class="no-img">Sin imagen</div>`}<span class="stock-chip ${stockOk ? 'ok' : 'no'}">${stockOk ? 'Con stock' : 'Sin stock'}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p class="product-sku">SKU: ${text(current?.sku || p.sku)} · ${typeText}${p.variation_count ? ` · ${p.variation_count} variaciones` : ''}</p></div><p class="price">${money(price)}</p></div>${renderVariationPanel(p)}${!can.ok ? `<div class="stock-warning">${text(can.reason)}</div>` : ''}<div class="product-actions"><input class="qty" id="qty-${p.id}" type="number" min="1" value="1" ${disabled}/><button data-add="${p.id}" ${disabled}>${can.ok ? 'Agregar' : 'Sin stock'}</button><button class="secondary" data-send="${p.id}" ${disabled}>Enviar a conversación</button></div></div></article>`;
 }
 function renderVariationModal() {
   const product = findProduct(state.variationModalProductId);
@@ -636,12 +560,15 @@ function closeVariationModal() {
   state.variationModalProductId = null;
 }
 function renderProducts() {
-  document.body.classList.toggle('show-all-stock', ($('stockFilter')?.value || '') !== 'instock');
   setMetric('metricProducts', state.productos.length);
   const vCount = state.productos.reduce((s,p)=>s+Number(p.variation_count || (p.variations||[]).length || 0),0);
   setMetric('metricVariations', vCount);
-  if (!state.productos.length) { $('productsList').innerHTML = `<div class="empty-state"><strong>No hay productos para mostrar en ${text(currentStore().name || state.activeStore)}</strong><p>Prueba Limpiar caché y Sincronizar catálogo de esta misma tienda. Si el contador aparece con productos de otra tienda, abre /productos/debug?store=${encodeURIComponent(state.activeStore)}.</p></div>`; if ($('loadMoreInfo')) $('loadMoreInfo').textContent = `0/${state.productTotal || 0} productos`; $('loadMoreBtn').classList.add('hidden'); return; }
-  state.productos = state.productos.slice().sort(sortProductsByStockThenName);
+  if (!state.productos.length) {
+    $('productsList').innerHTML = '<span class="muted">No hay productos para mostrar.</span>';
+    if ($('loadMoreInfo')) $('loadMoreInfo').textContent = `0/${state.productTotal || 0} productos`;
+    $('loadMoreBtn').classList.add('hidden');
+    return;
+  }
   $('productsList').innerHTML = state.productos.map(renderProductCard).join('');
   $('loadMoreInfo').textContent = `${state.productos.length}/${state.productTotal || state.productos.length} productos`;
   $('loadMoreBtn').classList.toggle('hidden', !(state.productos.length < state.productTotal || state.productos.length % state.productLimit === 0));
@@ -712,8 +639,8 @@ async function sendToConversation(product, quantity, variation=null) {
   if (!$('customerEmail')?.value?.trim()) await enrichContextFromServer(conversationId).catch(console.warn);
   const can = canAddProduct(product, variation); if (!can.ok) { notifyWarning(can.reason); return; }
   const imageUrl = variation?.imagen || product?.imagen || product?.imagenes?.[0]?.src || '';
-  await api('/chatwoot/enviar-producto', { method:'POST', body: JSON.stringify({ conversationId, product, variation, quantity, imageUrl, autoLabels: true, custom_attributes: { rivaida_store: state.activeStore, rivaida_country: currentStore().country } }) });
-  notifySuccess('Producto enviado a la conversación', `${currentStore().name || state.activeStore}: imagen adjunta si el canal lo permite.`);
+  await api('/chatwoot/enviar-producto', { method:'POST', body: JSON.stringify({ conversationId, product, variation, quantity, imageUrl, autoLabels: true }) });
+  notifySuccess('Producto enviado a la conversación', 'Se intentó adjuntar la imagen real para WhatsApp/Chatwoot.');
 }
 function buildProductSearchParams(offset=0) {
   const params = new URLSearchParams();
@@ -726,14 +653,12 @@ function buildProductSearchParams(offset=0) {
   return params.toString();
 }
 async function loadProducts(force=false, append=false) {
-  let expectedStore = state.activeStore;
   if (state.productLoading) return;
   if (!isStoreEnabled(state.activeStore)) {
     const fallback = firstEnabledStoreId();
     if (fallback && fallback !== state.activeStore) {
       notifyWarning('Tienda sin credenciales', `Cambiando a ${state.stores.find(s=>s.id===fallback)?.name || fallback}.`);
       state.activeStore = fallback; localStorage.setItem('activeStore', fallback);
-      expectedStore = fallback;
       const sel = $('storeSelect'); if (sel) sel.value = fallback;
       applyStoreUI();
     } else {
@@ -751,24 +676,9 @@ async function loadProducts(force=false, append=false) {
   try {
     const endpoint = `/productos/search?${buildProductSearchParams(nextOffset)}${force ? '&refresh=true' : ''}`;
     const data = await api(endpoint);
-    if (expectedStore !== state.activeStore) { pushUiLog('warning','Catálogo descartado por cambio de tienda', `${expectedStore} → ${state.activeStore}`); return; }
-    if (data.store && data.store !== state.activeStore) { notifyWarning('Catálogo descartado', `El servidor respondió ${data.store}, pero la tienda activa es ${state.activeStore}.`); return; }
-    const rawProducts = data.productos || [];
-    let wrongStoreCount = 0;
-    let incoming = rawProducts.filter((p) => {
-      const ps = normalizeStoreIdClient(p.store_id || p.store || data.store || state.activeStore);
-      p.store_id = ps || state.activeStore;
-      if (ps && ps !== state.activeStore) wrongStoreCount += 1;
-      return !ps || ps === state.activeStore;
-    });
-    if (!incoming.length && rawProducts.length && wrongStoreCount === rawProducts.length && !force) {
-      pushUiLog('warning', 'Respuesta mezclada descartada', `Se recibieron ${wrongStoreCount} productos de otra tienda. Reintentando sin cache.`);
-      state.productLoading = false;
-      return loadProducts(true, append);
-    }
-    incoming = incoming.sort(sortProductsByStockThenName);
+    const incoming = data.productos || [];
     state.productos = append ? [...state.productos, ...incoming] : incoming;
-    state.productTotal = Number(incoming.length ? (data.total || state.productos.length) : 0);
+    state.productTotal = Number(data.total || state.productos.length);
     state.productOffset = state.productos.length;
     renderProducts();
     setLoadingState(data.cached ? 'Listo' : 'Actualizado', `${state.productos.length}/${state.productTotal} productos`);
@@ -876,7 +786,6 @@ function buildOrderPayload() {
   if (!regionCode || !comuna) throw new Error(st.country === 'CO' ? 'Seleccione departamento y ciudad.' : 'Seleccione region y comuna.');
   const regionObj = state.regiones.find(r => r.codigo === regionCode) || {};
   const regionName = regionObj.region || regionCode;
-  formatBillingPhoneInPlace();
   const billing = { first_name:$('billingFirstName').value.trim(), last_name:$('billingLastName').value.trim(), email, phone:$('billingPhone').value.trim(), address_1:$('billingAddress').value.trim(), address_2:$('billingAddress2').value.trim(), city:comuna, postcode:$('billingPostcode').value.trim() || (st.country === 'CO' ? '110111' : ''), state:regionCode, country:st.country };
   return {
     rut,
@@ -1212,10 +1121,6 @@ async function saveConversationAttributes() {
     rivaida_email_detectado: $('customerEmail')?.value?.trim() || '',
     rivaida_carrito_total: cartTotal ? String(Math.round(cartTotal)) : '',
     rivaida_rut_validado: $('rutStatus')?.classList?.contains('ok') ? 'true' : 'false',
-    rivaida_store: state.activeStore,
-    rivaida_country: currentStore().country,
-    rivaida_metodo_pago: $('paymentMethod')?.value || '',
-    rivaida_metodo_envio: $('shippingMethod')?.selectedOptions?.[0]?.textContent || '',
     rivaida_ultimo_producto: state.cart[0]?.product?.nombre || '',
     rivaida_ultimo_sku: state.cart[0]?.variation?.sku || state.cart[0]?.product?.sku || ''
   };
@@ -1279,53 +1184,9 @@ ${JSON.stringify(data, null, 2)}`);
   }
 }
 
-async function clearCache() {
-  localStorage.removeItem(`regiones_${state.activeStore}_v86`);
-  ['cl','co'].forEach((id)=>localStorage.removeItem(`regiones_${id}_v86`));
-  await api('/cache/clear', { method:'POST', body:'{}' });
-  state.productos=[]; state.productOffset=0; state.productTotal=0;
-  setLoadingState('Limpio'); notifySuccess('Cache limpiado');
-}
-
-function addHelpBubbles() {
-  const helpMap = {
-    'Email cliente':'Correo del cliente. Si la app se abre dentro de Chatwoot puede detectarlo automáticamente.',
-    'ID conversación Chatwoot':'ID de conversación usado para enviar productos, etiquetas y atributos al chat.',
-    'Tienda / pais':'Selector manual de tienda activa. Dentro de Chatwoot la app también cambia sola por inbox/bandeja, teléfono +56/+57, etiquetas o atributo rivaida_store.',
-    'Dominio público':'URL pública de esta app, por ejemplo https://app.rivaida.cl.',
-    'Token app Chatwoot':'Token que va en la URL de Dashboard App: ?panel_token=...',
-    'Mapa Inbox → tienda JSON':'Ejemplo: {"12":"cl","15":"co"}. Así la app cambia de país por bandeja de WhatsApp.',
-    'URL Woo Chile':'Dominio de WooCommerce Chile, sin /wp-admin ni /wp-json.',
-    'URL Woo Colombia':'Dominio de WooCommerce Colombia, sin /wp-admin ni /wp-json.',
-    'Enviar imagen como adjunto':'Para WhatsApp, usa JPG/PNG. WebP o imágenes pesadas pueden producir error 131053 y se enviará enlace de respaldo.',
-    'Flow API URL':'Solo se usa para Flow directo. El flujo recomendado es link de pago WooCommerce.',
-    'Prompt Chile':'Instrucciones de IA para responder ventas de Chile: RUT, comuna, CLP, Flow y despacho local.',
-    'Prompt Colombia':'Instrucciones de IA para Colombia: CC/NIT, ciudad/departamento, COP y métodos disponibles.'
-  };
-  document.querySelectorAll('label').forEach(label => {
-    if (label.dataset.helpAdded) return;
-    const labelText = Array.from(label.childNodes).filter(n=>n.nodeType===3).map(n=>n.textContent.trim()).join(' ').trim() || label.firstChild?.textContent?.trim() || '';
-    const msg = helpMap[labelText];
-    if (!msg) return;
-    const b = document.createElement('span');
-    b.className = 'help-bubble';
-    b.textContent = '?';
-    b.title = msg;
-    b.setAttribute('aria-label', msg);
-    label.insertBefore(b, label.firstElementChild || null);
-    label.dataset.helpAdded = '1';
-  });
-}
-
+async function clearCache() { localStorage.removeItem(`regiones_${state.activeStore}_v831`); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); notifySuccess('Cache limpiado'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/stores'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('openSettingsBtn')?.addEventListener('click', () => toggleSettings(true));
-$('openStatusBtn')?.addEventListener('click', () => openSystemModal('status'));
-$('openLogsBtn')?.addEventListener('click', () => openSystemModal('logs'));
-$('closeSystemModalBtn')?.addEventListener('click', closeSystemModal);
-$('systemBackdrop')?.addEventListener('click', closeSystemModal);
-$('closeSystemModalBtn2')?.addEventListener('click', closeSystemModal);
-$('refreshSystemStatusBtn')?.addEventListener('click', () => openSystemModal(($('systemModalTitle')?.textContent || '').toLowerCase().includes('log') ? 'logs' : 'status')); 
-$('refreshSystemStatusBtn')?.addEventListener('click', refreshSystemStatus);
 $('closeSettingsBtn')?.addEventListener('click', () => toggleSettings(false));
 $('settingsBackdrop')?.addEventListener('click', () => toggleSettings(false));
 $('saveSettingsBtn')?.addEventListener('click', saveSettings);
@@ -1334,41 +1195,6 @@ $('testWooCoBtn')?.addEventListener('click', () => testSettings('woo','co'));
 $('testChatwootBtn')?.addEventListener('click', () => testSettings('chatwoot'));
 $('logoutBtn').addEventListener('click', ()=>{ localStorage.removeItem('panelAuth'); localStorage.removeItem('panelToken'); state.auth=''; state.panelToken=''; showLogin(); });
 $('loadBtn').addEventListener('click', () => loadPanel(false));
-
-function renderLocalLogs() {
-  const lines = (state.uiLogs || []).slice(0, 40).map(l => `[${new Date(l.time).toLocaleString()}] ${l.store || '-'} ${l.level}: ${l.message}${l.detail ? ' · ' + l.detail : ''}`);
-  return lines.join('\n') || 'Sin logs locales.';
-}
-function statusBadge(ok, textOk='Conectado', textBad='Pendiente') {
-  return `<span class="status-badge ${ok ? 'ok' : 'warn'}">${ok ? textOk : textBad}</span>`;
-}
-async function openSystemModal(mode='status') {
-  $('systemModal')?.classList.remove('hidden');
-  const title = $('systemModalTitle');
-  if (title) title.textContent = mode === 'logs' ? 'Logs del panel' : 'Estado de conexiones';
-  await refreshSystemStatus();
-}
-function closeSystemModal() { $('systemModal')?.classList.add('hidden'); }
-async function refreshSystemStatus() {
-  const box = $('systemStatusBox');
-  const logs = $('systemLogsBox');
-  if (box) box.innerHTML = '<div class="mini-loader"></div><p>Verificando conexiones...</p>';
-  try {
-    const data = await api('/diagnostics/status');
-    const stores = data.stores || [];
-    if (box) box.innerHTML = `
-      <article class="status-card"><strong>App</strong>${statusBadge(true, data.app_name || 'Rivaida Commerce Hub')}<small>Versión ${text(data.version || '8.4')}</small></article>
-      <article class="status-card"><strong>Chatwoot</strong>${statusBadge(data.chatwoot?.configured, 'Configurado', 'Sin credenciales')}<small>${text(data.chatwoot?.url || '')}</small></article>
-      <article class="status-card"><strong>Índice rápido</strong>${statusBadge(data.postgres, 'Activo', 'Sin conexión')}<small>Redis: ${data.redis ? 'activo' : 'pendiente'}</small></article>
-      ${stores.map(st => `<article class="status-card store-${st.id}"><strong>${text(st.name || st.id)}</strong>${statusBadge(st.enabled, 'Woo configurado', 'Woo pendiente')}<small>${text(st.country)} · ${text(st.currency)} · ${Number(st.index_count || 0)} productos indexados</small></article>`).join('')}
-    `;
-    if (logs) logs.textContent = (data.logs || []).map(l => `[${new Date(l.time).toLocaleString()}] ${l.level}: ${l.message}${l.store ? ' · ' + l.store : ''}${l.detail ? ' · ' + l.detail : ''}`).join('\n') + '\n\n--- Logs locales ---\n' + renderLocalLogs();
-  } catch (e) {
-    if (box) box.innerHTML = `<div class="empty-state error"><strong>No se pudo consultar estado</strong><p>${text(e.message)}</p></div>`;
-    if (logs) logs.textContent = renderLocalLogs();
-  }
-}
-
 $('refreshOrdersBtn')?.addEventListener('click', () => loadPanel(true));
 $('refreshProductsBtn').addEventListener('click', () => loadProducts(true));
 $('syncProductsBtn')?.addEventListener('click', syncProducts);
@@ -1378,8 +1204,6 @@ $('productFilter').addEventListener('input', scheduleProductSearch);
 $('categoryFilter')?.addEventListener('change', () => loadProducts(false));
 $('saleFilter')?.addEventListener('change', () => loadProducts(false));
 $('stockFilter')?.addEventListener('change', () => loadProducts(false));
-$('billingPhone')?.addEventListener('blur', formatBillingPhoneInPlace);
-$('billingPhone')?.addEventListener('change', formatBillingPhoneInPlace);
 $('createOrderBtn').addEventListener('click', createOrder); $('payBtn').addEventListener('click', payOrder);
 $('copyPlatformBtn')?.addEventListener('click', () => copyPlatformData('text'));
 $('copyPlatformJsonBtn')?.addEventListener('click', () => copyPlatformData('json'));
@@ -1420,6 +1244,5 @@ $('variationBackdrop')?.addEventListener('click', closeVariationModal);
 $('variationModalApplyBtn')?.addEventListener('click', () => { closeVariationModal(); notifySuccess('Variación seleccionada'); });
 $('themeMode')?.addEventListener('change', () => updateTheme($('themeMode').value, $('themeAccent')?.value));
 $('themeAccent')?.addEventListener('change', () => updateTheme($('themeMode')?.value, $('themeAccent').value));
-readUiLogs();
 applyThemeSettings();
 testAuth();
