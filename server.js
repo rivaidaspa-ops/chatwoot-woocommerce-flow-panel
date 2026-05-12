@@ -95,7 +95,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v6.2', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v6.4', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -160,6 +160,70 @@ function getPostcode(comuna, fallback = '8320000') { return comunaMap.get(normal
 const regiones = loadRegiones().map((r) => ({ ...r, comunas: (r.comunas || []).map((nombre) => ({ comuna: nombre, postcode: getPostcode(nombre, process.env.DEFAULT_POSTCODE || '8320000') })) }));
 const comunaRegionMap = new Map();
 for (const region of regiones) for (const c of region.comunas) comunaRegionMap.set(normalizeText(c.comuna), { codigo: region.codigo, region: region.region });
+const regionMapByCode = new Map(regiones.map((r) => [String(r.codigo || '').toUpperCase(), r]));
+const regionMapByName = new Map(regiones.map((r) => [normalizeText(r.region || ''), r]));
+
+const RUT_META_KEYS = [
+  '_billing_rut', 'billing_rut', 'rut', '_rut',
+  'billing_run', '_billing_run', 'run', '_run',
+  'billing_dni', '_billing_dni', 'dni', '_dni',
+  'billing_document', '_billing_document', 'billing_documento', '_billing_documento',
+  'billing_document_number', '_billing_document_number', 'document_number', '_document_number',
+  'billing_tax_id', '_billing_tax_id', 'tax_id', '_tax_id'
+];
+
+function getMetaValue(metaData = [], keys = []) {
+  const wanted = new Set(keys.map((k) => normalizeText(k)));
+  for (const m of metaData || []) {
+    const key = normalizeText(m.key || '');
+    if (wanted.has(key) && m.value !== undefined && m.value !== null && String(m.value).trim() !== '') return String(m.value).trim();
+  }
+  return '';
+}
+
+function mergeMetaData(meta = []) {
+  const out = [];
+  const seen = new Set();
+  for (const item of meta || []) {
+    if (!item || !item.key) continue;
+    const k = String(item.key);
+    const nk = normalizeText(k);
+    if (seen.has(nk)) continue;
+    seen.add(nk);
+    out.push({ key: k, value: item.value });
+  }
+  return out;
+}
+
+function buildRutMeta(rutFormatted) {
+  if (!rutFormatted) return [];
+  const clean = String(rutFormatted).replace(/\./g, '').replace(/-/g, '').toUpperCase();
+  const withDash = rutFormatted;
+  return [
+    ...RUT_META_KEYS.map((key) => ({ key, value: withDash })),
+    { key: '_billing_rut_clean', value: clean },
+    { key: 'billing_rut_clean', value: clean }
+  ];
+}
+
+function resolveRegionInfo(regionInput = '', comuna = '') {
+  const raw = String(regionInput || '').trim();
+  const codeCandidate = raw.toUpperCase();
+  if (regionMapByCode.has(codeCandidate)) {
+    const r = regionMapByCode.get(codeCandidate);
+    return { codigo: r.codigo, region: r.region };
+  }
+  const byName = regionMapByName.get(normalizeText(raw));
+  if (byName) return { codigo: byName.codigo, region: byName.region };
+  const byComuna = comunaRegionMap.get(normalizeText(comuna || ''));
+  if (byComuna) return byComuna;
+  return { codigo: raw, region: raw };
+}
+
+function regionStateValue(info) {
+  if (process.env.CHILE_STATE_FORMAT === 'code') return info.codigo || '';
+  return info.region || info.codigo || '';
+}
 
 async function initDb() {
   if (!pgPool) return false;
@@ -356,17 +420,36 @@ function flowSign(params) {
 }
 function buildFlowPayload(params) { const p = { ...params }; p.s = flowSign(p); return new URLSearchParams(p).toString(); }
 function normalizeCheckout(body) {
-  const rut = String(body.rut || body.billing?.rut || '').trim();
+  const rut = String(body.rut || body.billing?.rut || getMetaValue(body.meta_data, RUT_META_KEYS) || '').trim();
   if (process.env.REQUIRE_RUT !== 'false' && !validateRut(rut)) { const e = new Error('RUT chileno invalido o faltante'); e.status = 400; throw e; }
+  const rutFormatted = formatRut(rut);
   const billing = { ...(body.billing || {}) };
   const shipping = { ...(body.shipping || billing) };
   const comuna = body.comuna || billing.city || shipping.city;
   const postcode = body.postcode || getPostcode(comuna, process.env.DEFAULT_POSTCODE || '8320000');
+  const regionInfo = resolveRegionInfo(body.region_nombre || body.region || body.region_codigo || billing.state || shipping.state, comuna);
+  const stateValue = regionStateValue(regionInfo);
   billing.country = 'CL'; shipping.country = 'CL';
-  const region = body.region || body.region_codigo || billing.state || shipping.state || comunaRegionMap.get(normalizeText(comuna || ''))?.codigo || '';
-  billing.state = region; shipping.state = region;
+  billing.state = stateValue; shipping.state = stateValue;
   billing.postcode = postcode; shipping.postcode = postcode;
   billing.city = comuna || billing.city; shipping.city = comuna || shipping.city;
+
+  const metaData = mergeMetaData([
+    ...(body.meta_data || []),
+    ...buildRutMeta(rutFormatted),
+    { key: '_billing_region', value: regionInfo.region || '' },
+    { key: 'billing_region', value: regionInfo.region || '' },
+    { key: '_billing_region_code', value: regionInfo.codigo || '' },
+    { key: 'billing_region_code', value: regionInfo.codigo || '' },
+    { key: '_shipping_region', value: regionInfo.region || '' },
+    { key: '_shipping_region_code', value: regionInfo.codigo || '' },
+    { key: '_billing_comuna', value: comuna || '' },
+    { key: 'billing_comuna', value: comuna || '' },
+    { key: '_shipping_comuna', value: comuna || '' },
+    { key: '_origen_pedido', value: 'Chatwoot WooCommerce Flow Panel' },
+    { key: '_integracion_chile_postcodes', value: 'billing_city/shipping_city + postcode automatico' }
+  ]);
+
   return {
     payment_method: body.payment_method || 'flow',
     payment_method_title: body.payment_method_title || 'Flow - Webpay / Multicaja',
@@ -377,7 +460,7 @@ function normalizeCheckout(body) {
     line_items: (body.line_items || []).map((i) => ({ product_id: Number(i.product_id), variation_id: i.variation_id ? Number(i.variation_id) : undefined, quantity: Number(i.quantity) })),
     shipping_lines: body.shipping_lines || [],
     customer_note: body.customer_note || '',
-    meta_data: [ ...(body.meta_data || []), { key: '_billing_rut', value: formatRut(rut) }, { key: 'rut', value: formatRut(rut) }, { key: '_billing_region', value: region || '' }, { key: '_shipping_region', value: region || '' }, { key: '_billing_comuna', value: comuna || '' }, { key: '_shipping_comuna', value: comuna || '' }, { key: '_origen_pedido', value: 'Chatwoot WooCommerce Flow Panel' } ]
+    meta_data: metaData
   };
 }
 async function validateStock(lineItems = []) {
@@ -392,6 +475,51 @@ async function validateStock(lineItems = []) {
     if (product.stock_status !== 'instock') { const e = new Error(`Sin stock disponible para ${product.name || 'variacion'}`); e.status = 409; throw e; }
     if (product.manage_stock && product.stock_quantity !== null && qty > Number(product.stock_quantity)) { const e = new Error(`Stock insuficiente. Disponible: ${product.stock_quantity}`); e.status = 409; throw e; }
   }
+}
+
+
+function buildRecommendations(payload = {}) {
+  const cliente = payload.cliente || {};
+  const pedidos = Array.isArray(payload.pedidos) ? payload.pedidos : [];
+  const cart = Array.isArray(payload.cart) ? payload.cart : [];
+  const rut = String(payload.rut || cliente.rut || '').trim();
+  const comuna = String(payload.comuna || cliente.direccion?.city || '').trim();
+  const region = String(payload.region || cliente.direccion?.region_codigo || cliente.direccion?.state || '').trim();
+  const email = String(payload.email || cliente.email || '').trim();
+  const labels = new Set(['panel_chatwoot', 'woo_panel']);
+  const reasons = [];
+  if (rut && validateRut(rut)) { labels.add('rut_validado'); reasons.push('RUT validado correctamente.'); }
+  else { labels.add('rut_pendiente'); reasons.push('Conviene solicitar o validar RUT antes de crear el pedido.'); }
+  if (comuna) { labels.add(`comuna_${normalizeText(comuna).replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,32)}`); reasons.push(`Comuna detectada: ${comuna}.`); }
+  if (region) { labels.add(`region_${normalizeText(region).replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,32)}`); }
+  if (cart.length) { labels.add('carrito_activo'); reasons.push(`${cart.length} item(s) en carrito.`); }
+  if (pedidos.length) {
+    labels.add('cliente_recurrente');
+    const last = pedidos[0];
+    if (last?.estado) labels.add(`ultimo_pedido_${String(last.estado).replace(/[^a-z0-9_]+/gi,'_').toLowerCase()}`);
+    reasons.push('Cliente con historial de pedidos en WooCommerce.');
+  } else labels.add('cliente_nuevo');
+  const totalCart = cart.reduce((sum, item) => sum + Number(item?.variation?.precio || item?.product?.precio || 0) * Number(item?.quantity || 1), 0);
+  if (totalCart >= 50000) labels.add('ticket_alto');
+  if (payload.stockStatus === 'outofstock') labels.add('sin_stock');
+  const messageLines = [];
+  messageLines.push('Hola, revisé la disponibilidad y puedo ayudarle a finalizar su compra.');
+  if (cart.length) messageLines.push(`Tengo seleccionado ${cart.length} producto(s) para cotizar o crear el pedido.`);
+  if (!rut || !validateRut(rut)) messageLines.push('Para emitir correctamente el pedido en Chile, me puede confirmar su RUT.');
+  if (!comuna) messageLines.push('También necesito comuna y dirección completa para validar despacho.');
+  messageLines.push('Cuando confirme los datos, puedo generar el pedido y el link de pago en CLP.');
+  return {
+    labels: Array.from(labels).filter(Boolean).slice(0, 12),
+    reasons,
+    suggested_message: messageLines.join('\n'),
+    next_actions: [
+      !rut || !validateRut(rut) ? 'Solicitar RUT valido' : 'RUT listo',
+      !comuna ? 'Solicitar comuna de despacho' : 'Comuna lista',
+      cart.length ? 'Crear pedido desde el carrito' : 'Agregar producto recomendado al carrito',
+      'Enviar link de pago Flow si el cliente confirma'
+    ],
+    ai: false
+  };
 }
 
 app.get('/flow/retorno', (req, res) => res.sendFile(path.join(__dirname, 'public', 'flow-retorno.html')));
@@ -416,11 +544,11 @@ app.get('/cliente', async (req, res, next) => {
       const customer = customers[0] || null;
       const { data: orders } = await wc.get('/orders', { params: { search: email, per_page: 30, orderby: 'date', order: 'desc' } });
       const billing = customer?.billing || {};
-      const rutMeta = customer?.meta_data?.find((m) => String(m.key).toLowerCase().includes('rut'))?.value || '';
+      const rutMeta = getMetaValue(customer?.meta_data || [], RUT_META_KEYS) || '';
       const regionFound = comunaRegionMap.get(normalizeText(billing.city || '')) || null;
       return {
         cliente: customer ? { id: customer.id, nombre: `${customer.first_name || ''} ${customer.last_name || ''}`.trim(), email: customer.email, telefono: billing.phone || '', rut: rutMeta || billing.rut || '', direccion: { ...billing, region_codigo: regionFound?.codigo || billing.state || '', region_nombre: regionFound?.region || billing.state || '' }, meta: extractMeta(customer.meta_data) } : { nombre: '', email, telefono: '', rut: '', direccion: {} },
-        pedidos: orders.map((order) => ({ id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', fecha: order.date_created, metodo_pago: order.payment_method_title, rut: order.meta_data?.find((m) => String(m.key).toLowerCase().includes('rut'))?.value || '', productos: order.line_items?.map((item) => ({ nombre: item.name, cantidad: item.quantity, total: item.total, sku: item.sku, meta: item.meta_data })) || [], meta: extractMeta(order.meta_data) }))
+        pedidos: orders.map((order) => ({ id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', fecha: order.date_created, metodo_pago: order.payment_method_title, rut: getMetaValue(order.meta_data || [], RUT_META_KEYS) || '', productos: order.line_items?.map((item) => ({ nombre: item.name, cantidad: item.quantity, total: item.total, sku: item.sku, meta: item.meta_data })) || [], meta: extractMeta(order.meta_data) }))
       };
     }, force);
     res.json({ ...result.value, cached: result.cached });
@@ -511,6 +639,35 @@ app.post('/chatwoot/etiquetas', async (req, res, next) => {
     res.json({ ok: true, labels });
   } catch (error) { next(error); }
 });
+
+app.post('/chatwoot/recomendaciones', async (req, res, next) => {
+  try {
+    let recommendations = buildRecommendations(req.body || {});
+    const aiUrl = process.env.AI_RECOMMENDATION_WEBHOOK_URL || '';
+    if (aiUrl) {
+      try {
+        const { data } = await axios.post(aiUrl, { ...req.body, base_recommendations: recommendations }, { timeout: Number(process.env.AI_TIMEOUT_MS || 15000) });
+        recommendations = { ...recommendations, ...(data || {}), ai: true };
+      } catch (e) {
+        recommendations.ai_error = e.message;
+      }
+    }
+    res.json({ ok: true, recommendations });
+  } catch (error) { next(error); }
+});
+
+app.post('/chatwoot/aplicar-recomendaciones', async (req, res, next) => {
+  try {
+    const client = chatwootClient();
+    if (!client) return res.status(400).json({ error: 'Faltan credenciales Chatwoot' });
+    const { conversationId, labels = [], message = '', privateNote = true } = req.body;
+    if (!conversationId) return res.status(400).json({ error: 'conversationId es obligatorio' });
+    if (Array.isArray(labels) && labels.length) await client.post(`/conversations/${conversationId}/labels`, { labels });
+    if (message) await client.post(`/conversations/${conversationId}/messages`, { content: message, message_type: 'outgoing', private: Boolean(privateNote) });
+    res.json({ ok: true, labels, message_sent: Boolean(message) });
+  } catch (error) { next(error); }
+});
+
 app.use((req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
 app.use((error, req, res, next) => {
   console.error('[ERROR]', error.response?.data || error.message);

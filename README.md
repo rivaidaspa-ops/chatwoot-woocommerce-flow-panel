@@ -83,3 +83,25 @@ Si los placeholders de tu Chatwoot cambian, usa los equivalentes de email/contac
 - Las variaciones se seleccionan con controles limpios por Color/Talla u otros atributos visibles.
 - La imagen, SKU, precio y stock cambian según la variación seleccionada.
 - Se agregó selector de tema: claro, oscuro y compacto, más color de acento.
+
+
+## v6.4
+- Validador de RUT local y en backend.
+- Integración con conversación Chatwoot: envío de productos, aplicación de etiquetas y recomendaciones.
+- Asistente de venta con reglas locales; opcionalmente puede usar `AI_RECOMMENDATION_WEBHOOK_URL` para conectar una IA externa.
+- Más temas visuales: claro, oscuro, compacto, premium y alto contraste; más acentos: teal, azul, verde, grafito, naranjo, morado, cyan, rosa y negro.
+
+### URL como aplicación/panel en Chatwoot
+Usa una URL como:
+`https://TU-DOMINIO/?email={{contact.email}}&conversation_id={{conversation.id}}&panel_token=TU_PANEL_APP_TOKEN`
+
+Variables necesarias para Chatwoot:
+`CHATWOOT_URL`, `CHATWOOT_API_KEY`, `CHATWOOT_ACCOUNT_ID`, `PANEL_APP_TOKEN`.
+
+
+## v6.5 - Corrección RUT y regiones Chile
+
+- El RUT se guarda en varias claves de metadatos para compatibilidad con campos personalizados WooCommerce/AliDropship: `_billing_rut`, `billing_rut`, `rut`, `_rut`, `billing_run`, `billing_dni`, `billing_document`, `billing_documento`, `billing_tax_id` y versiones limpias sin puntos/guion.
+- La región se envía por defecto como nombre legible en `billing.state` y `shipping.state` para evitar que WooCommerce muestre `CL-RM` en la dirección. El código se conserva en `_billing_region_code`.
+- Si por alguna configuración de WooCommerce necesita volver a enviar el código, agregue `CHILE_STATE_FORMAT=code` en variables de entorno.
+- Las comunas siguen usando `billing.city`/`shipping.city` y el código postal se resuelve automáticamente desde la comuna, compatible con Chile Postcodes for WooCommerce.

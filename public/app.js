@@ -14,7 +14,8 @@ const state = {
   productLoading: false,
   syncTimer: null,
   themeMode: localStorage.getItem('panelThemeMode') || 'light',
-  themeAccent: localStorage.getItem('panelThemeAccent') || 'teal'
+  themeAccent: localStorage.getItem('panelThemeAccent') || 'teal',
+  recommendations: null
 };
 const $ = (id) => document.getElementById(id);
 const money = (v) => `$${Number(v || 0).toLocaleString('es-CL')} CLP`;
@@ -296,8 +297,13 @@ function buildOrderPayload() {
   const required = ['billingFirstName','billingLastName','billingRut','billingPhone','billingAddress']; for (const id of required) if (!$(id).value.trim()) throw new Error('Complete nombre, apellido, RUT, telefono y direccion.');
   if (!validateRutLocal(rut)) throw new Error('Ingrese un RUT valido.');
   if (!regionCode || !comuna) throw new Error('Seleccione region y comuna.');
-  const billing = { first_name:$('billingFirstName').value.trim(), last_name:$('billingLastName').value.trim(), email, phone:$('billingPhone').value.trim(), rut, address_1:$('billingAddress').value.trim(), address_2:$('billingAddress2').value.trim(), city:comuna, postcode:$('billingPostcode').value.trim(), state:regionCode, country:'CL' };
-  return { rut, region: regionCode, comuna, postcode: billing.postcode, billing, shipping: billing, payment_method:$('paymentMethod').value, payment_method_title:$('paymentMethod').value === 'flow' ? 'Flow - Webpay / Multicaja' : $('paymentMethod').value, line_items: state.cart.map(i => ({ product_id:i.product.id, variation_id:i.variation?.id, quantity:i.quantity })), customer_note:$('customerNote').value.trim() || 'Pedido creado desde panel Chatwoot.', meta_data:[{key:'_chatwoot_conversation_id', value:$('conversationId').value.trim()}] };
+  const regionObj = state.regiones.find(r => r.codigo === regionCode) || {};
+  const regionName = regionObj.region || regionCode;
+  const rutClean = rut.replace(/\./g,'').replace(/-/g,'').toUpperCase();
+  const billing = { first_name:$('billingFirstName').value.trim(), last_name:$('billingLastName').value.trim(), email, phone:$('billingPhone').value.trim(), address_1:$('billingAddress').value.trim(), address_2:$('billingAddress2').value.trim(), city:comuna, postcode:$('billingPostcode').value.trim(), state:regionName, country:'CL' };
+  const rutMeta = ['_billing_rut','billing_rut','rut','_rut','billing_run','_billing_run','billing_dni','_billing_dni','billing_document','_billing_document','billing_documento','_billing_documento','billing_tax_id','_billing_tax_id'].map(key => ({ key, value: rut }));
+  rutMeta.push({ key:'_billing_rut_clean', value: rutClean }, { key:'billing_rut_clean', value: rutClean });
+  return { rut, region: regionName, region_codigo: regionCode, region_nombre: regionName, comuna, postcode: billing.postcode, billing, shipping: { ...billing }, payment_method:$('paymentMethod').value, payment_method_title:$('paymentMethod').value === 'flow' ? 'Flow - Webpay / Multicaja' : $('paymentMethod').value, line_items: state.cart.map(i => ({ product_id:i.product.id, variation_id:i.variation?.id, quantity:i.quantity })), customer_note:$('customerNote').value.trim() || 'Pedido creado desde panel Chatwoot.', meta_data:[{key:'_chatwoot_conversation_id', value:$('conversationId').value.trim()}, ...rutMeta, {key:'_billing_region_code', value:regionCode}, {key:'_billing_region', value:regionName}, {key:'_billing_comuna', value:comuna}] };
 }
 async function createOrder() { $('orderStatus').textContent=''; try { const data = await api('/crear-pedido', { method:'POST', body: JSON.stringify(buildOrderPayload()) }); state.lastOrder = data.pedido; $('orderStatus').style.color = '#15803d'; $('orderStatus').textContent = `Pedido #${data.pedido.numero} creado por ${money(data.pedido.total)}.`; await loadPanel(true); } catch(e) { $('orderStatus').style.color = '#b91c1c'; $('orderStatus').textContent = e.message; } }
 async function payOrder() { try { if (!state.lastOrder) await createOrder(); if (!state.lastOrder) return; const data = await api('/pagar', { method:'POST', body: JSON.stringify({ orderId:state.lastOrder.id, amount:state.lastOrder.total, email:$('customerEmail').value.trim(), subject:`Pedido #${state.lastOrder.numero}` }) }); window.open(data.url, '_blank', 'noopener,noreferrer'); } catch(e) { alert(e.message); } }
@@ -317,6 +323,50 @@ function updateTheme(mode, accent) {
   applyThemeSettings();
 }
 
+
+function recommendationPayload() {
+  return {
+    cliente: state.cliente,
+    pedidos: state.pedidos,
+    cart: state.cart,
+    email: $('customerEmail')?.value?.trim() || '',
+    rut: $('billingRut')?.value?.trim() || '',
+    region: $('billingRegion')?.value || '',
+    comuna: $('billingComuna')?.value || '',
+    conversationId: $('conversationId')?.value?.trim() || ''
+  };
+}
+function renderRecommendations(rec) {
+  const box = $('recommendationBox');
+  if (!box) return;
+  if (!rec) { box.className = 'recommendation-box muted'; box.textContent = 'Sin recomendaciones todavía.'; return; }
+  box.className = 'recommendation-box';
+  box.innerHTML = `<div class="rec-labels">${(rec.labels || []).map(l => `<span>${text(l)}</span>`).join('')}</div><div class="rec-grid"><div><strong>Motivos</strong><ul>${(rec.reasons || []).map(r => `<li>${text(r)}</li>`).join('')}</ul></div><div><strong>Próximos pasos</strong><ul>${(rec.next_actions || []).map(r => `<li>${text(r)}</li>`).join('')}</ul></div></div><label>Respuesta sugerida<textarea id="suggestedMessageBox">${text(rec.suggested_message || '')}</textarea></label>${rec.ai ? '<p class="mini ok">IA conectada</p>' : '<p class="mini">Reglas locales</p>'}${rec.ai_error ? `<p class="mini bad">IA no disponible: ${text(rec.ai_error)}</p>` : ''}`;
+}
+async function recommendLabels() {
+  try {
+    const data = await api('/chatwoot/recomendaciones', { method:'POST', body: JSON.stringify(recommendationPayload()) });
+    state.recommendations = data.recommendations;
+    renderRecommendations(state.recommendations);
+    if ($('labelInput') && state.recommendations?.labels?.length) $('labelInput').value = state.recommendations.labels.join(', ');
+  } catch (e) { alert(e.message); }
+}
+async function applyRecommendedLabels() {
+  const conversationId = $('conversationId').value.trim();
+  if (!conversationId) return alert('Ingrese ID de conversación Chatwoot.');
+  if (!state.recommendations) await recommendLabels();
+  const labels = state.recommendations?.labels || [];
+  if (!labels.length) return alert('No hay etiquetas recomendadas.');
+  await api('/chatwoot/etiquetas', { method:'POST', body: JSON.stringify({ conversationId, labels }) });
+  alert('Etiquetas recomendadas aplicadas.');
+}
+async function copyRecommendation() {
+  const msg = $('suggestedMessageBox')?.value || state.recommendations?.suggested_message || '';
+  if (!msg) return alert('Primero genera una recomendación.');
+  await navigator.clipboard.writeText(msg);
+  alert('Respuesta copiada.');
+}
+
 async function clearCache() { localStorage.removeItem('regionesChileV6'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/regiones'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('logoutBtn').addEventListener('click', ()=>{ localStorage.removeItem('panelAuth'); localStorage.removeItem('panelToken'); state.auth=''; state.panelToken=''; showLogin(); });
@@ -334,6 +384,9 @@ $('billingRegion').addEventListener('change', () => renderComunas($('billingRegi
 $('billingComuna').addEventListener('change', updatePostcode);
 $('billingRut').addEventListener('input', updateRutStatus);
 $('applyLabelsBtn').addEventListener('click', applyLabels);
+$('recommendBtn')?.addEventListener('click', recommendLabels);
+$('applyRecommendedLabelsBtn')?.addEventListener('click', applyRecommendedLabels);
+$('copyRecommendationBtn')?.addEventListener('click', copyRecommendation);
 $('themeMode')?.addEventListener('change', () => updateTheme($('themeMode').value, $('themeAccent')?.value));
 $('themeAccent')?.addEventListener('change', () => updateTheme($('themeMode')?.value, $('themeAccent').value));
 applyThemeSettings();

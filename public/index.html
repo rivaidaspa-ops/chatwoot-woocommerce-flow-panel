@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Panel Pro Chile v6.3 · Chatwoot App + WooCommerce + Flow</title>
+  <title>Panel Pro Chile v6.4 · Chatwoot App + WooCommerce + Flow</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -24,12 +24,12 @@
   <main id="app" class="app hidden">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Chatwoot App Panel Chile v6.3</p>
+        <p class="eyebrow">Chatwoot App Panel Chile v6.4</p>
         <h1>Panel interno rápido para Chatwoot con checkout chileno y variaciones limpias</h1>
         <p class="muted">Dockerfile listo para EasyPanel, Redis + PostgreSQL, busqueda paginada, sincronizacion en segundo plano y variaciones bajo demanda.</p>
       </div>
       <div class="top-actions">
-        <div class="theme-controls" aria-label="Preferencias de interfaz"><select id="themeMode" title="Tema"><option value="light">Tema claro</option><option value="dark">Tema oscuro</option><option value="compact">Tema compacto</option></select><select id="themeAccent" title="Color"><option value="teal">Teal</option><option value="blue">Azul</option><option value="green">Verde</option><option value="slate">Grafito</option></select></div>
+        <div class="theme-controls" aria-label="Preferencias de interfaz"><select id="themeMode" title="Tema"><option value="light">Tema claro</option><option value="dark">Tema oscuro</option><option value="compact">Tema compacto</option><option value="luxury">Tema premium</option><option value="contrast">Alto contraste</option></select><select id="themeAccent" title="Color"><option value="teal">Teal</option><option value="blue">Azul</option><option value="green">Verde</option><option value="slate">Grafito</option><option value="orange">Naranjo</option><option value="purple">Morado</option><option value="cyan">Cyan</option><option value="rose">Rosa</option><option value="black">Negro</option></select></div>
         <button id="syncProductsBtn" class="secondary">Sincronizar catálogo</button><button id="refreshProductsBtn" class="secondary">Actualizar vista</button>
         <button id="clearCacheBtn" class="ghost">Limpiar caché</button>
         <button id="logoutBtn" class="ghost">Cerrar sesión</button>
@@ -76,6 +76,13 @@
     <section class="card">
       <div class="section-title"><h2>Chatwoot</h2><span class="muted">Etiquetas y mensaje directo a conversación</span></div>
       <div class="tag-row"><input id="labelInput" placeholder="Ej: pendiente_pago, interesado, rut_validado, region_rm" /><button id="applyLabelsBtn" class="secondary">Aplicar etiquetas</button></div>
+    </section>
+
+
+    <section class="card ai-card">
+      <div class="section-title"><div><h2>Asistente de venta</h2><p class="muted">Recomienda etiquetas, próximos pasos y un mensaje para la conversación. Funciona con reglas locales y puede conectarse a IA mediante webhook.</p></div><span class="pill">Recomendaciones</span></div>
+      <div class="ai-actions"><button id="recommendBtn" class="secondary">Recomendar etiquetas y respuesta</button><button id="applyRecommendedLabelsBtn" class="secondary">Aplicar etiquetas recomendadas</button><button id="copyRecommendationBtn" class="ghost">Copiar respuesta</button></div>
+      <div id="recommendationBox" class="recommendation-box muted">Presiona recomendar para analizar cliente, carrito, RUT, comuna y pedidos.</div>
     </section>
 
     <section class="card"><h2>Pedidos</h2><div id="ordersList" class="orders-list muted">Sin pedidos cargados.</div></section>
