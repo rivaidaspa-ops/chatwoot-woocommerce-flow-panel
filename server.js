@@ -1,4 +1,4 @@
-// v8.6.6 Rivaida Commerce Hub: productos Colombia aislados, cache no-store y Chatwoot sin dependencia sharp.
+// v8.6.7 Rivaida Commerce Hub: rollback estable, Colombia aislado, sin cache 304 para catálogo.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -11,11 +11,10 @@ const morgan = require('morgan');
 const Redis = require('ioredis');
 const { Pool } = require('pg');
 const FormData = require('form-data');
-let sharp = null;
-try { sharp = require('sharp'); } catch (_) { sharp = null; }
 const BOOT_ENV = { ...process.env };
 
 const app = express();
+app.set('etag', false);
 const PORT = Number(process.env.PORT || 3001);
 const WC_URL = String(process.env.WC_URL || '').replace(/\/$/, '');
 const FLOW_API_URL = String(process.env.FLOW_API_URL || 'https://www.flow.cl/api').replace(/\/$/, '');
@@ -95,7 +94,6 @@ function defaultShippingFallback(store) {
 }
 
 function getCfg(key, fallback = '') { return process.env[key] !== undefined && process.env[key] !== '' ? process.env[key] : fallback; }
-function normalizeStoreId(value = '') { const raw = String(value || '').trim().toLowerCase(); if (raw === 'co' || raw === 'colombia') return 'co'; if (raw === 'cl' || raw === 'chile') return 'cl'; return raw; }
 function buildDefaultStoreConfig() {
   return {
     cl: { id:'cl', code:'CL', name:getCfg('CL_STORE_NAME','Rivaida Chile'), country:'CL', currency:getCfg('CL_CURRENCY','CLP'), locale:'es-CL', wc_url:String(getCfg('WC_URL','')).replace(/\/$/,''), wc_key:getCfg('WC_KEY',''), wc_secret:getCfg('WC_SECRET',''), document_label:'RUT', document_type:'rut', document_required:getCfg('REQUIRE_RUT','true')!=='false', document_fields:['billing_rut','shipping_rut','_billing_rut','_shipping_rut'], payment_gateway_id:getCfg('WOO_FLOW_GATEWAY_ID','flow'), payment_gateway_title:getCfg('WOO_FLOW_GATEWAY_TITLE','Flow'), postcode_default:getCfg('DEFAULT_POSTCODE','8320000'), state_format:getCfg('CHILE_STATE_FORMAT','name'), chatwoot_labels:['chile','rivaida-cl'] },
@@ -105,17 +103,25 @@ function buildDefaultStoreConfig() {
 function buildStoreConfig() {
   const custom=parseJsonEnv('STORE_CONFIG_JSON',{});
   const merged={...buildDefaultStoreConfig(),...custom};
-  const normalized = {};
-  Object.keys(merged).forEach((id)=>{ const st=merged[id]||{}; st.id=normalizeStoreId(st.id||id); st.code=String(st.code||st.country||st.id).toUpperCase(); st.country=String(st.country||st.code||st.id).toUpperCase(); st.currency=st.currency||(st.country==='CO'?'COP':'CLP'); st.wc_url=String(st.wc_url||'').replace(/\/$/,''); normalized[st.id]=st; });
-  return normalized;
+  Object.keys(merged).forEach((id)=>{ const st=merged[id]||{}; st.id=String(st.id||id).toLowerCase(); st.code=String(st.code||st.country||id).toUpperCase(); st.country=String(st.country||st.code||id).toUpperCase(); st.currency=st.currency||(st.country==='CO'?'COP':'CLP'); st.wc_url=String(st.wc_url||'').replace(/\/$/,''); merged[id]=st; });
+  return merged;
 }
 let STORE_CONFIG = buildStoreConfig();
-function currentDefaultStore() { return normalizeStoreId(BOOT_ENV.DEFAULT_STORE || getCfg('DEFAULT_STORE','cl')) || 'cl'; }
+function normalizeStoreId(input='') {
+  const raw = String(input || '').trim().toLowerCase();
+  if (['co','colombia','cop','57','+57'].includes(raw)) return 'co';
+  if (['cl','chile','clp','56','+56'].includes(raw)) return 'cl';
+  return raw || 'cl';
+}
+function currentDefaultStore() { return normalizeStoreId(BOOT_ENV.DEFAULT_STORE || getCfg('DEFAULT_STORE','cl')); }
 const wcClients = new Map();
 function rebuildRuntimeConfig() { STORE_CONFIG = buildStoreConfig(); wcClients.clear(); allowedOrigins = parseAllowedOrigins(); }
 
-function listStores() { return Object.values(STORE_CONFIG).map((s)=>({ id:normalizeStoreId(s.id), code:s.code, name:s.name, country:s.country, currency:s.currency, document_label:s.document_label, document_type:s.document_type, payment_gateway_id:s.payment_gateway_id, payment_presets:s.payment_presets||[], enabled:Boolean(s.wc_url&&s.wc_key&&s.wc_secret) })); }
-function resolveStore(input='') { const raw=normalizeStoreId(input); return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>normalizeStoreId(s.country||s.code)===raw) || STORE_CONFIG[currentDefaultStore()] || Object.values(STORE_CONFIG)[0]; }
+function listStores() { return Object.values(STORE_CONFIG).map((s)=>({ id:s.id, code:s.code, name:s.name, country:s.country, currency:s.currency, document_label:s.document_label, document_type:s.document_type, payment_gateway_id:s.payment_gateway_id, payment_presets:s.payment_presets||[], enabled:Boolean(s.wc_url&&s.wc_key&&s.wc_secret) })); }
+function resolveStore(input='') {
+  const raw = normalizeStoreId(input);
+  return STORE_CONFIG[raw] || Object.values(STORE_CONFIG).find((s)=>normalizeStoreId(s.country || s.code || s.id) === raw) || STORE_CONFIG[currentDefaultStore()] || Object.values(STORE_CONFIG)[0];
+}
 function storeFromReq(req) { return resolveStore(req.query.store || req.query.country || req.body?.store_id || req.body?.store || req.body?.country || req.headers['x-store-id'] || currentDefaultStore()); }
 function missingWooFields(st = {}) {
   const missing = [];
@@ -153,14 +159,13 @@ app.use(helmet({ contentSecurityPolicy: false, frameguard: false }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('combined'));
-
-// Evita respuestas 304/caché viejo en catálogo, diagnóstico y archivos principales.
 app.use((req, res, next) => {
-  if (req.path.startsWith('/productos') || req.path.startsWith('/categorias') || req.path.startsWith('/stores') || req.path.startsWith('/admin/settings') || req.path.startsWith('/diagnostics') || req.path === '/app.js' || req.path === '/styles.css' || req.path === '/') {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('Surrogate-Control', 'no-store');
+  const noStorePaths = ['/productos', '/categorias', '/stores', '/admin/settings', '/payment-methods', '/shipping-methods', '/diagnostics'];
+  if (noStorePaths.some((p) => req.path === p || req.path.startsWith(p + '/')) || req.path === '/app.js' || req.path === '/styles.css') {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Surrogate-Control', 'no-store');
   }
   next();
 });
@@ -181,7 +186,7 @@ let dbReady = false;
 let redisReady = false;
 let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
 const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.6.6';
+const APP_VERSION = '8.6.7';
 const appLogs = [];
 function addLog(level, message, data = {}) {
   const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
@@ -281,7 +286,7 @@ function chatwootClient() {
   if (!chatwootUrl || !apiKey || !accountId) return null;
   return axios.create({
     baseURL: `${chatwootUrl}/api/v1/accounts/${accountId}`,
-    headers: { api_access_token: apiKey },
+    headers: { api_access_token: apiKey, 'Content-Type': 'application/json' },
     timeout: 20000
   });
 }
@@ -406,7 +411,7 @@ const CONFIG_KEYS = [
   'CO_COD_GATEWAY_ID','CO_COD_GATEWAY_TITLE','CO_WOMPI_GATEWAY_ID','CO_WOMPI_GATEWAY_TITLE','CO_BOLD_GATEWAY_ID','CO_BOLD_GATEWAY_TITLE','CO_PSE_GATEWAY_ID','CO_PSE_GATEWAY_TITLE','CO_MERCADO_PAGO_GATEWAY_ID','CO_MERCADO_PAGO_GATEWAY_TITLE','CO_EPAYCO_GATEWAY_ID','CO_EPAYCO_GATEWAY_TITLE','CO_PAYU_GATEWAY_ID','CO_PAYU_GATEWAY_TITLE','CO_BANK_TRANSFER_GATEWAY_ID','CO_BANK_TRANSFER_GATEWAY_TITLE','CO_PAYMENT_METHOD_PRESETS_JSON','CL_DEFAULT_SHIPPING_METHOD_ID','CL_DEFAULT_SHIPPING_METHOD_TITLE','CO_DEFAULT_SHIPPING_METHOD_ID','CO_DEFAULT_SHIPPING_METHOD_TITLE',
   'CHATWOOT_URL','CHATWOOT_API_KEY','CHATWOOT_ACCOUNT_ID',
   'PAYMENT_LINK_PROVIDER','FLOW_API_URL','FLOW_API_KEY','FLOW_SECRET_KEY','FLOW_URL_CONFIRMATION','FLOW_URL_RETURN','AI_RECOMMENDATION_WEBHOOK_URL',
-  'CACHE_TTL_SECONDS','PRODUCT_PAGE_SIZE','MAX_PAGE_SIZE','SYNC_PER_PAGE','VARIATION_CACHE_SECONDS','CHATWOOT_SEND_IMAGE_ATTACHMENT','CHATWOOT_NORMALIZE_IMAGE_ATTACHMENT','IMAGE_MAX_BYTES','IMAGE_TARGET_MAX_BYTES','IMAGE_TARGET_MAX_WIDTH','IMAGE_TARGET_MAX_HEIGHT','CHATWOOT_UPLOAD_TIMEOUT_MS','CHATWOOT_INBOX_STORE_MAP','CL_CHATWOOT_INBOX_IDS','CO_CHATWOOT_INBOX_IDS','AUTO_STORE_BY_PHONE','AI_PROVIDER','OPENAI_API_KEY','OPENAI_MODEL','DEEPSEEK_API_KEY','DEEPSEEK_MODEL','GEMINI_API_KEY','GEMINI_MODEL','GLOBAL_AI_PROMPT','CL_AI_PROMPT','CO_AI_PROMPT','AI_TIMEOUT_MS'
+  'CACHE_TTL_SECONDS','PRODUCT_PAGE_SIZE','MAX_PAGE_SIZE','SYNC_PER_PAGE','VARIATION_CACHE_SECONDS','CHATWOOT_SEND_IMAGE_ATTACHMENT','CHATWOOT_INBOX_STORE_MAP','CL_CHATWOOT_INBOX_IDS','CO_CHATWOOT_INBOX_IDS','AUTO_STORE_BY_PHONE','AI_PROVIDER','OPENAI_API_KEY','OPENAI_MODEL','DEEPSEEK_API_KEY','DEEPSEEK_MODEL','GEMINI_API_KEY','GEMINI_MODEL','GLOBAL_AI_PROMPT','CL_AI_PROMPT','CO_AI_PROMPT','AI_TIMEOUT_MS'
 ];
 async function ensureAppSettingsTable() {
   if (!pgPool) return false;
@@ -547,7 +552,7 @@ function normalizeProduct(product, variations = null, store = null) {
     precio_oferta: product.sale_price || '',
     en_oferta: Boolean(product.on_sale || Number(product.sale_price || 0) > 0),
     moneda: st.currency || 'CLP',
-    store_id: normalizeStoreId(st.id),
+    store_id: st.id,
     country: st.country,
     stock: product.stock_quantity,
     stock_status: product.stock_status,
@@ -596,7 +601,7 @@ async function upsertProductsIndex(products=[]) {
       await client.query(`INSERT INTO product_index (store_id,id,type,nombre,sku,precio,precio_regular,precio_oferta,stock,stock_status,imagen,permalink,categorias,etiquetas,variation_count,search_text,payload,updated_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,now())
         ON CONFLICT (store_id,id) DO UPDATE SET type=EXCLUDED.type,nombre=EXCLUDED.nombre,sku=EXCLUDED.sku,precio=EXCLUDED.precio,precio_regular=EXCLUDED.precio_regular,precio_oferta=EXCLUDED.precio_oferta,stock=EXCLUDED.stock,stock_status=EXCLUDED.stock_status,imagen=EXCLUDED.imagen,permalink=EXCLUDED.permalink,categorias=EXCLUDED.categorias,etiquetas=EXCLUDED.etiquetas,variation_count=EXCLUDED.variation_count,search_text=EXCLUDED.search_text,payload=EXCLUDED.payload,updated_at=now()`,
-        [normalizeStoreId(p.store_id || p.store || 'cl') || 'cl',p.id,p.type,p.nombre,p.sku,Number(p.precio||0),Number(p.precio_regular||0),Number(p.precio_oferta||0),p.stock,p.stock_status,p.imagen,p.permalink,p.categorias||[],p.etiquetas||[],Number(p.variation_count || 0),searchText,JSON.stringify({ ...p, store_id: normalizeStoreId(p.store_id || p.store || 'cl') || 'cl' })]);
+        [p.store_id || p.store || 'cl',p.id,p.type,p.nombre,p.sku,Number(p.precio||0),Number(p.precio_regular||0),Number(p.precio_oferta||0),p.stock,p.stock_status,p.imagen,p.permalink,p.categorias||[],p.etiquetas||[],Number(p.variation_count || 0),searchText,JSON.stringify(p)]);
     }
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); console.warn('[Postgres upsert]', e.message); }
@@ -614,7 +619,7 @@ async function searchProductsIndex({ q='', category='', sale=false, stock='', li
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   values.push(Number(limit)); const limitIdx=values.length; values.push(Number(offset)); const offsetIdx=values.length;
   const { rows } = await pgPool.query(`SELECT payload, count(*) OVER() AS total FROM product_index ${where} ORDER BY CASE WHEN stock_status = 'instock' THEN 0 ELSE 1 END, nombre ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values);
-  return { productos: rows.map(r => ({ ...r.payload, store_id: st.id, country: st.country, moneda: r.payload?.moneda || st.currency })), total: Number(rows[0]?.total || 0), source: 'postgres' };
+  return { productos: rows.map(r => r.payload), total: Number(rows[0]?.total || 0), source: 'postgres' };
 }
 async function getVariations(productId, store = resolveStore(currentDefaultStore()), force=false) {
   const st = resolveStore(store.id || store);
@@ -663,7 +668,7 @@ async function runCatalogSync(store = resolveStore(currentDefaultStore())) {
   const wc = wcForStore(st);
   if (syncJob.running) return;
   addLog('info','Sincronización iniciada',{store:st.id});
-  syncJob = { running: true, startedAt: new Date().toISOString(), finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: st.id };
+  syncJob = { running: true, startedAt: new Date().toISOString(), finishedAt: null, page: 0, total: 0, indexed: 0, error: null };
   try {
     await cacheDelPrefix(`productos:${st.id}:`);
     let page = 1;
@@ -970,22 +975,6 @@ app.get('/cliente', async (req, res, next) => {
     res.json({ ...result.value, cached: result.cached });
   } catch (error) { next(error); }
 });
-app.get('/productos/debug', async (req, res, next) => {
-  try {
-    const st = storeFromReq(req);
-    const out = { ok:true, store:st.id, country:st.country, enabled:Boolean(st.wc_url && st.wc_key && st.wc_secret), missing:missingWooFields(st), index_count:await productIndexCount(st.id), default_store:currentDefaultStore(), source:null, sample:[] };
-    if (out.enabled) {
-      const found = await searchProductsIndex({ limit:5, offset:0 }, st);
-      if (found && found.productos.length) { out.source='postgres'; out.sample = found.productos.map(p => ({ id:p.id, nombre:p.nombre, stock_status:p.stock_status, store_id:p.store_id, country:p.country })); }
-      else {
-        const live = await buildProductsPage({ limit:5, offset:0 }, st);
-        out.source='woocommerce'; out.sample = live.productos.map(p => ({ id:p.id, nombre:p.nombre, stock_status:p.stock_status, store_id:p.store_id, country:p.country }));
-      }
-    }
-    res.json(out);
-  } catch (error) { next(error); }
-});
-
 app.get('/productos', async (req, res, next) => {
   req.url = `/productos/search?${new URLSearchParams(req.query).toString()}`;
   return app._router.handle(req, res, next);
@@ -997,19 +986,31 @@ app.get('/productos/search', async (req, res, next) => {
     const cacheKey = `productos:${st.id}:search:${hashKey(JSON.stringify(params))}`;
     const force = req.query.refresh === 'true';
     const result = await remember(cacheKey, PAGE_CACHE_SECONDS, async () => {
-      let found = null;
-      if (!force) found = await searchProductsIndex(params, st);
+      let found = await searchProductsIndex(params, st);
       if (!found) {
         found = await buildProductsPage(params, st);
         if (params.category || params.sale || params.stock === 'instock') found = filterProductsLocal(found.productos, { ...params, offset: 0 });
       }
-      found.productos = (found.productos || []).map(p => ({ ...p, store_id: st.id, country: st.country, moneda: p.moneda || st.currency }));
       return found;
     }, force);
-    const indexCount = await productIndexCount(st.id);
-    res.json({ ...result.value, store:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count:indexCount, sync:syncJob });
+    const payload = result.value || { productos: [], total: 0, source: 'empty' };
+    payload.productos = (payload.productos || []).map((p) => ({ ...p, store_id: normalizeStoreId(p.store_id || p.store || st.id), country: p.country || st.country }));
+    res.json({ ...payload, store:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count: await productIndexCount(st.id), sync:syncJob });
   } catch (error) { next(error); }
 });
+app.get('/productos/debug', async (req, res, next) => {
+  try {
+    const st = storeFromReq(req);
+    let sample = [];
+    let index_count = await productIndexCount(st.id);
+    if (pgPool && dbReady) {
+      const { rows } = await pgPool.query('SELECT id,nombre,sku,stock_status,store_id,precio,currency,payload FROM product_index WHERE store_id=$1 ORDER BY CASE WHEN stock_status=\'instock\' THEN 0 ELSE 1 END, nombre ASC LIMIT 8', [st.id]);
+      sample = rows.map((r) => ({ id:r.id, nombre:r.nombre, sku:r.sku, stock_status:r.stock_status, store_id:r.store_id, precio:r.precio, payload_store:r.payload?.store_id || '', payload_country:r.payload?.country || '' }));
+    }
+    res.json({ ok:true, version:APP_VERSION, store:st.id, country:st.country, currency:st.currency, enabled:Boolean(st.wc_url && st.wc_key && st.wc_secret), index_count, sample, sync:syncJob });
+  } catch (error) { next(error); }
+});
+
 app.get('/productos/:id/variaciones', async (req, res, next) => {
   try {
     const force = req.query.refresh === 'true';
@@ -1432,149 +1433,48 @@ const DEFAULT_CHATWOOT_ATTRIBUTES = [
   { attribute_display_name:'Rivaida metodo envio', attribute_key:'rivaida_metodo_envio', attribute_description:'Metodo de envio elegido', attribute_display_type:0, attribute_model:0 }
 ];
 
-function normalizeImageUrlForFetch(rawUrl = '', store = null) {
-  let url = String(rawUrl || '').trim().replace(/&amp;/g, '&');
-  if (!url) return '';
-  if (url.startsWith('//')) url = `https:${url}`;
-  try {
-    const base = store?.wc_url || getCfg(`${String(store?.id || '').toUpperCase()}_WOO_URL`, '') || getCfg('PUBLIC_BASE_URL', '') || getCfg('CL_WOO_URL', '') || getCfg('CO_WOO_URL', '');
-    return new URL(url, base || undefined).toString();
-  } catch (_) {
-    return url;
-  }
-}
-
-function detectImageMime(buffer, declared = '') {
-  const b = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
-  if (b.length >= 12 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
-  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
-  if (b.length >= 12 && b.slice(0,4).toString('ascii') === 'RIFF' && b.slice(8,12).toString('ascii') === 'WEBP') return 'image/webp';
-  if (b.length >= 6 && ['GIF87a','GIF89a'].includes(b.slice(0,6).toString('ascii'))) return 'image/gif';
-  const clean = String(declared || '').split(';')[0].trim().toLowerCase();
-  return clean.startsWith('image/') ? clean : 'application/octet-stream';
-}
-
-function safeImageFilename(url = '', mime = 'image/jpeg') {
-  let base = 'producto';
-  try {
-    const pathname = new URL(url).pathname || '';
-    const last = decodeURIComponent(pathname.split('/').filter(Boolean).pop() || '');
-    if (last) base = last.replace(/\.[a-z0-9]{2,5}$/i, '');
-  } catch (_) {}
-  base = base.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'producto';
-  const ext = mime.includes('png') ? 'png' : 'jpg';
-  return `${base}-${Date.now()}.${ext}`;
-}
-
-async function prepareChatwootImageAttachment(img, store = null) {
-  const sourceUrl = normalizeImageUrlForFetch(img, store);
-  if (!sourceUrl) throw new Error('Producto sin imagen disponible para adjuntar.');
-  const fetchMaxBytes = Number(getCfg('IMAGE_FETCH_MAX_BYTES', '12000000'));
-  const outputMaxBytes = Number(getCfg('IMAGE_MAX_BYTES', '4500000'));
-  const targetMaxBytes = Number(getCfg('IMAGE_TARGET_MAX_BYTES', '2200000'));
-  const maxWidth = Number(getCfg('IMAGE_TARGET_MAX_WIDTH', '1280'));
-  const maxHeight = Number(getCfg('IMAGE_TARGET_MAX_HEIGHT', '1280'));
-  const imageResp = await axios.get(sourceUrl, {
-    responseType: 'arraybuffer',
-    timeout: Number(getCfg('IMAGE_FETCH_TIMEOUT_MS', '20000')),
-    maxContentLength: fetchMaxBytes,
-    maxBodyLength: fetchMaxBytes,
-    headers: {
-      'User-Agent': 'Rivaida-Commerce-Hub/8.6.6 (+https://app.rivaida.cl)',
-      'Accept': 'image/avif,image/webp,image/jpeg,image/png,image/*,*/*;q=0.5',
-      'Referer': store?.wc_url || getCfg('PUBLIC_BASE_URL', '') || undefined
-    },
-    validateStatus: (status) => status >= 200 && status < 400
-  });
-  let buffer = Buffer.from(imageResp.data || []);
-  if (!buffer.length) throw new Error('La imagen descargada esta vacia.');
-  let mime = detectImageMime(buffer, imageResp.headers['content-type']);
-  const originalMime = mime;
-  const originalBytes = buffer.length;
-  const mustNormalize = getCfg('CHATWOOT_NORMALIZE_IMAGE_ATTACHMENT', 'true') !== 'false';
-  const supportedDirect = ['image/jpeg', 'image/png'].includes(mime);
-
-  if (sharp && mustNormalize) {
-    let quality = Number(getCfg('IMAGE_JPEG_QUALITY', '84'));
-    quality = Number.isFinite(quality) ? Math.min(92, Math.max(55, quality)) : 84;
-    let converted = await sharp(buffer, { animated: false, failOn: 'none' })
-      .rotate()
-      .resize({ width: maxWidth, height: maxHeight, fit: 'inside', withoutEnlargement: true })
-      .flatten({ background: '#ffffff' })
-      .jpeg({ quality, mozjpeg: true })
-      .toBuffer();
-    while (converted.length > targetMaxBytes && quality > 58) {
-      quality -= 8;
-      converted = await sharp(buffer, { animated: false, failOn: 'none' })
-        .rotate()
-        .resize({ width: maxWidth, height: maxHeight, fit: 'inside', withoutEnlargement: true })
-        .flatten({ background: '#ffffff' })
-        .jpeg({ quality, mozjpeg: true })
-        .toBuffer();
-    }
-    buffer = converted;
-    mime = 'image/jpeg';
-  } else if (!supportedDirect) {
-    throw new Error(`Formato ${mime} no compatible para adjuntar como archivo. Se envia URL de respaldo.`);
-  }
-
-  if (buffer.length > outputMaxBytes) throw new Error(`Imagen demasiado pesada despues de normalizar (${buffer.length} bytes).`);
-  return {
-    buffer,
-    mime,
-    filename: safeImageFilename(sourceUrl, mime),
-    sourceUrl,
-    originalMime,
-    originalBytes,
-    finalBytes: buffer.length,
-    normalized: Boolean(sharp && mustNormalize)
-  };
-}
-
-function formHeadersWithLength(form) {
-  return new Promise((resolve) => {
-    form.getLength((err, length) => {
-      const headers = form.getHeaders();
-      if (!err && Number.isFinite(Number(length))) headers['Content-Length'] = length;
-      resolve(headers);
-    });
-  });
-}
-
-async function sendChatwootProductMessage(client, conversationId, content, img, privateNote, contentAttributes, store = null) {
+async function sendChatwootProductMessage(client, conversationId, content, img, privateNote, contentAttributes) {
   const wantsAttachment = img && getCfg('CHATWOOT_SEND_IMAGE_ATTACHMENT','true') !== 'false';
   if (wantsAttachment) {
     try {
-      const prepared = await prepareChatwootImageAttachment(img, store);
+      const maxBytes = Number(getCfg('IMAGE_MAX_BYTES','4500000'));
+      const allowed = String(getCfg('CHATWOOT_ALLOWED_IMAGE_MIME','image/jpeg,image/png')).split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
+      const imageResp = await axios.get(img, {
+        responseType: 'arraybuffer',
+        timeout: Number(getCfg('IMAGE_FETCH_TIMEOUT_MS','15000')),
+        maxContentLength: maxBytes,
+        headers: { 'User-Agent': 'Rivaida-Commerce-Hub/8.5', 'Accept': 'image/jpeg,image/png,image/*;q=0.8,*/*;q=0.5' }
+      });
+      const mime = String(imageResp.headers['content-type'] || 'image/jpeg').split(';')[0].toLowerCase();
+      const size = Number(imageResp.data?.byteLength || 0);
+      if (!mime.startsWith('image/')) throw new Error(`La URL no retorno imagen valida: ${mime}`);
+      if (!allowed.includes(mime)) throw new Error(`Formato ${mime} no adjuntado para WhatsApp; se envia enlace. Use JPG/PNG para evitar error 131053.`);
+      if (size > maxBytes) throw new Error(`Imagen demasiado pesada (${size} bytes); se envia enlace para evitar error 131053.`);
+      const ext = mime.includes('png') ? 'png' : 'jpg';
+      const filename = `producto-${Date.now()}.${ext}`;
       const form = new FormData();
       form.append('content', content);
       form.append('message_type', 'outgoing');
-      form.append('private', privateNote ? 'true' : 'false');
-      form.append('content_attributes', JSON.stringify({ ...(contentAttributes || {}), image_url: prepared.sourceUrl }));
-      form.append('attachments[]', prepared.buffer, { filename: prepared.filename, contentType: prepared.mime, knownLength: prepared.buffer.length });
-      const headers = await formHeadersWithLength(form);
-      const { data } = await client.post(`/conversations/${conversationId}/messages`, form, {
-        headers,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-        timeout: Number(getCfg('CHATWOOT_UPLOAD_TIMEOUT_MS', '30000'))
-      });
-      return { data, sentAsAttachment: true, imageFallback: false, imageUrl: prepared.sourceUrl, normalized: prepared.normalized, originalMime: prepared.originalMime, finalMime: prepared.mime, finalBytes: prepared.finalBytes };
+      form.append('private', String(Boolean(privateNote)));
+      form.append('content_type', 'text');
+      form.append('content_attributes', JSON.stringify(contentAttributes || {}));
+      form.append('attachments[]', Buffer.from(imageResp.data), { filename, contentType: mime });
+      const { data } = await client.post(`/conversations/${conversationId}/messages`, form, { headers: form.getHeaders(), maxBodyLength: maxBytes + 1000000 });
+      return { data, sentAsAttachment: true, imageFallback: false };
     } catch (e) {
-      addLog('warning','Imagen no adjuntada; se envia enlace seguro',{detail:e.response?.data ? JSON.stringify(e.response.data).slice(0,220) : e.message});
+      addLog('warning','Imagen no adjuntada; se envia enlace seguro',{detail:e.response?.data ? JSON.stringify(e.response.data).slice(0,180) : e.message});
       console.warn('[Chatwoot imagen adjunta] fallback texto:', e.response?.data || e.message);
     }
   }
-  const fallbackUrl = normalizeImageUrlForFetch(img, store);
-  const fallbackContent = [content, fallbackUrl ? `Imagen del producto: ${fallbackUrl}` : ''].filter(Boolean).join('\n');
+  const fallbackContent = [content, img ? `Imagen del producto: ${img}` : ''].filter(Boolean).join('\n');
   const { data } = await client.post(`/conversations/${conversationId}/messages`, {
     content: fallbackContent,
     message_type: 'outgoing',
     private: Boolean(privateNote),
     content_type: 'text',
-    content_attributes: { ...(contentAttributes || {}), image_url: fallbackUrl || undefined }
+    content_attributes: { ...(contentAttributes || {}), image_url: img || undefined }
   });
-  return { data, sentAsAttachment: false, imageFallback: Boolean(fallbackUrl), imageUrl: fallbackUrl };
+  return { data, sentAsAttachment: false, imageFallback: Boolean(img) };
 }
 
 function productImageUrl(product = {}, variation = null) { return variation?.imagen || product?.imagen || product?.imagenes?.[0]?.src || ''; }
@@ -1597,7 +1497,7 @@ app.post('/chatwoot/enviar-producto', async (req, res, next) => {
       `Cantidad sugerida: ${quantity}`,
       product.permalink ? `Link: ${product.permalink}` : ''
     ].filter(Boolean).join('\n');
-    const mediaResult = await sendChatwootProductMessage(client, conversationId, content, img, privateNote, { product_id: product.id, variation_id: variation?.id || undefined, sku: variation?.sku || product.sku || '', price: Number(price || 0), store_id: st.id, country: st.country }, st);
+    const mediaResult = await sendChatwootProductMessage(client, conversationId, content, img, privateNote, { product_id: product.id, variation_id: variation?.id || undefined, sku: variation?.sku || product.sku || '', price: Number(price || 0), store_id: st.id, country: st.country });
     if (autoLabels) {
       const existing = await getConversationLabels(client, conversationId);
       await client.post(`/conversations/${conversationId}/labels`, { labels: Array.from(new Set([...existing, 'rivaida_interesado', 'rivaida_producto_enviado'])) });
@@ -1605,7 +1505,7 @@ app.post('/chatwoot/enviar-producto', async (req, res, next) => {
     const attrsPayload = { rivaida_estado: 'producto_enviado', rivaida_store: st.id, rivaida_country: st.country, rivaida_ultimo_producto: product.nombre, rivaida_ultimo_sku: variation?.sku || product.sku || '', rivaida_ultima_imagen: img || '', ...custom_attributes };
     try { await client.post(`/conversations/${conversationId}/custom_attributes`, { custom_attributes: attrsPayload }); } catch (e) { console.warn('[Chatwoot atributos envio]', e.response?.data || e.message); }
     addLog('info','Producto enviado a Chatwoot',{store:st.id, detail: mediaResult.sentAsAttachment ? 'imagen adjunta' : 'fallback texto'});
-    res.json({ ok: true, store: st.id, country: st.country, message: mediaResult.sentAsAttachment ? 'Producto enviado a Chatwoot con imagen adjunta JPG' : 'Producto enviado a Chatwoot con enlace de imagen', image_sent_as_attachment: mediaResult.sentAsAttachment, image_fallback_url: mediaResult.imageFallback, imageUrl: mediaResult.imageUrl || img, image_normalized: mediaResult.normalized || false, image_original_mime: mediaResult.originalMime || '', image_final_mime: mediaResult.finalMime || '', image_final_bytes: mediaResult.finalBytes || 0 });
+    res.json({ ok: true, store: st.id, country: st.country, message: mediaResult.sentAsAttachment ? 'Producto enviado a Chatwoot con imagen adjunta' : 'Producto enviado a Chatwoot con enlace de imagen', image_sent_as_attachment: mediaResult.sentAsAttachment, image_fallback_url: mediaResult.imageFallback, imageUrl: img });
   } catch (error) { next(error); }
 });
 
@@ -1702,5 +1602,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v8.6.4 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Rivaida Commerce Hub v8.6.2 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

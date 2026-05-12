@@ -1,7 +1,7 @@
 {
   "name": "rivaida-commerce-hub",
-  "version": "8.6.6",
-  "description": "Rivaida Commerce Hub - fix real despliegue, productos Colombia aislados y Chatwoot sin sharp",
+  "version": "8.6.7",
+  "description": "Rivaida Commerce Hub - rollback estable con Colombia aislado, cache sin 304 y debug productos",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
