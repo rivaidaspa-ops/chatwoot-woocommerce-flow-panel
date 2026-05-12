@@ -1,7 +1,7 @@
 {
   "name": "chatwoot-woocommerce-flow-panel",
-  "version": "1.2.5",
-  "description": "Panel Chatwoot WooCommerce Flow Chile v6.5 RUT region fix",
+  "version": "1.2.7",
+  "description": "Panel Chatwoot WooCommerce Flow Chile v6.7 AliDropship RUT aliases and sanitized regions",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

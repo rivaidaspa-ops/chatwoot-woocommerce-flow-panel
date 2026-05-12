@@ -105,3 +105,17 @@ Variables necesarias para Chatwoot:
 - La región se envía por defecto como nombre legible en `billing.state` y `shipping.state` para evitar que WooCommerce muestre `CL-RM` en la dirección. El código se conserva en `_billing_region_code`.
 - Si por alguna configuración de WooCommerce necesita volver a enviar el código, agregue `CHILE_STATE_FORMAT=code` en variables de entorno.
 - Las comunas siguen usando `billing.city`/`shipping.city` y el código postal se resuelve automáticamente desde la comuna, compatible con Chile Postcodes for WooCommerce.
+
+
+## v6.6
+
+- UI con Bootstrap 5.3 por CDN.
+- Color de acento corregido: no cambia el color general de textos.
+- RUT compatible con AliDropship: se guarda como `cpf`, `billing_cpf`, `rut_code`, `billing_rut`, `_billing_rut` y claves equivalentes.
+- AliDropship Woo usa en su JS de orden API `address.cpf`; por eso el panel envía RUT limpio y formateado en esos metadatos.
+- Para IA opcional agrega `AI_RECOMMENDATION_WEBHOOK_URL=https://tu-webhook`.
+
+
+## v6.7
+- AliDropship: RUT tambien se guarda como `billing_rut`, `shipping_rut`, `cpf` y `code_number`.
+- Regiones: nombres sin tildes para compatibilidad; `CL-RM` se muestra como `Metropolitana de Santiago`.

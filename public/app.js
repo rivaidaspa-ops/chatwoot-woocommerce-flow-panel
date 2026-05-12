@@ -69,11 +69,11 @@ async function testAuth() {
   catch { localStorage.removeItem('panelAuth'); if (!state.panelToken) showLogin(); else showLogin(); }
 }
 async function loadRegiones(force=false) {
-  const cached = !force && readLocal('regionesChileV6', 86400000 * 30);
+  const cached = !force && readLocal('regionesChileV67', 86400000 * 30);
   if (cached) { state.regiones = cached; renderRegionOptions(); return; }
   const data = await api('/regiones');
   state.regiones = data.regiones || [];
-  saveLocal('regionesChileV6', state.regiones);
+  saveLocal('regionesChileV67', state.regiones);
   renderRegionOptions();
 }
 async function loadCategorias(force=false) {
@@ -301,9 +301,10 @@ function buildOrderPayload() {
   const regionName = regionObj.region || regionCode;
   const rutClean = rut.replace(/\./g,'').replace(/-/g,'').toUpperCase();
   const billing = { first_name:$('billingFirstName').value.trim(), last_name:$('billingLastName').value.trim(), email, phone:$('billingPhone').value.trim(), address_1:$('billingAddress').value.trim(), address_2:$('billingAddress2').value.trim(), city:comuna, postcode:$('billingPostcode').value.trim(), state:regionName, country:'CL' };
-  const rutMeta = ['_billing_rut','billing_rut','rut','_rut','billing_run','_billing_run','billing_dni','_billing_dni','billing_document','_billing_document','billing_documento','_billing_documento','billing_tax_id','_billing_tax_id'].map(key => ({ key, value: rut }));
-  rutMeta.push({ key:'_billing_rut_clean', value: rutClean }, { key:'billing_rut_clean', value: rutClean });
-  return { rut, region: regionName, region_codigo: regionCode, region_nombre: regionName, comuna, postcode: billing.postcode, billing, shipping: { ...billing }, payment_method:$('paymentMethod').value, payment_method_title:$('paymentMethod').value === 'flow' ? 'Flow - Webpay / Multicaja' : $('paymentMethod').value, line_items: state.cart.map(i => ({ product_id:i.product.id, variation_id:i.variation?.id, quantity:i.quantity })), customer_note:$('customerNote').value.trim() || 'Pedido creado desde panel Chatwoot.', meta_data:[{key:'_chatwoot_conversation_id', value:$('conversationId').value.trim()}, ...rutMeta, {key:'_billing_region_code', value:regionCode}, {key:'_billing_region', value:regionName}, {key:'_billing_comuna', value:comuna}] };
+  const rutFormattedKeys = ['_billing_rut','billing_rut','_shipping_rut','shipping_rut','rut','_rut','billing_run','_billing_run','shipping_run','_shipping_run','billing_dni','_billing_dni','shipping_dni','_shipping_dni','billing_document','_billing_document','shipping_document','_shipping_document','billing_documento','_billing_documento','shipping_documento','_shipping_documento','billing_tax_id','_billing_tax_id','shipping_tax_id','_shipping_tax_id','rut-code','_rut-code','billing-rut-code','_billing-rut-code','shipping-rut-code','_shipping-rut-code'];
+  const rutCleanKeys = ['cpf','_cpf','billing_cpf','_billing_cpf','shipping_cpf','_shipping_cpf','code_number','_code_number','billing_code_number','_billing_code_number','shipping_code_number','_shipping_code_number','rut_code','_rut_code','billing_rut_code','_billing_rut_code','shipping_rut_code','_shipping_rut_code','_billing_rut_clean','billing_rut_clean','_shipping_rut_clean','shipping_rut_clean'];
+  const rutMeta = [...rutFormattedKeys.map(key => ({ key, value: rut })), ...rutCleanKeys.map(key => ({ key, value: rutClean }))];
+  return { rut, region: regionName, region_codigo: regionCode, region_nombre: regionName, comuna, postcode: billing.postcode, billing, shipping: { ...billing }, payment_method:$('paymentMethod').value, payment_method_title:$('paymentMethod').value === 'flow' ? 'Flow - Webpay / Multicaja' : $('paymentMethod').value, line_items: state.cart.map(i => ({ product_id:i.product.id, variation_id:i.variation?.id, quantity:i.quantity })), customer_note:$('customerNote').value.trim() || 'Pedido creado desde panel Chatwoot.', meta_data:[{key:'_chatwoot_conversation_id', value:$('conversationId').value.trim()}, ...rutMeta, {key:'_billing_region_code', value:regionCode}, {key:'billing_region_code', value:regionCode}, {key:'_shipping_region_code', value:regionCode}, {key:'shipping_region_code', value:regionCode}, {key:'_billing_region', value:regionName}, {key:'billing_region', value:regionName}, {key:'_shipping_region', value:regionName}, {key:'shipping_region', value:regionName}, {key:'_billing_comuna', value:comuna}, {key:'billing_comuna', value:comuna}, {key:'_shipping_comuna', value:comuna}, {key:'shipping_comuna', value:comuna}] };
 }
 async function createOrder() { $('orderStatus').textContent=''; try { const data = await api('/crear-pedido', { method:'POST', body: JSON.stringify(buildOrderPayload()) }); state.lastOrder = data.pedido; $('orderStatus').style.color = '#15803d'; $('orderStatus').textContent = `Pedido #${data.pedido.numero} creado por ${money(data.pedido.total)}.`; await loadPanel(true); } catch(e) { $('orderStatus').style.color = '#b91c1c'; $('orderStatus').textContent = e.message; } }
 async function payOrder() { try { if (!state.lastOrder) await createOrder(); if (!state.lastOrder) return; const data = await api('/pagar', { method:'POST', body: JSON.stringify({ orderId:state.lastOrder.id, amount:state.lastOrder.total, email:$('customerEmail').value.trim(), subject:`Pedido #${state.lastOrder.numero}` }) }); window.open(data.url, '_blank', 'noopener,noreferrer'); } catch(e) { alert(e.message); } }
@@ -367,7 +368,7 @@ async function copyRecommendation() {
   alert('Respuesta copiada.');
 }
 
-async function clearCache() { localStorage.removeItem('regionesChileV6'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
+async function clearCache() { localStorage.removeItem('regionesChileV67'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/regiones'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('logoutBtn').addEventListener('click', ()=>{ localStorage.removeItem('panelAuth'); localStorage.removeItem('panelToken'); state.auth=''; state.panelToken=''; showLogin(); });
 $('loadBtn').addEventListener('click', () => loadPanel(false));

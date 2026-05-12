@@ -1,4 +1,4 @@
-// v6.2: no usa dotenv en produccion; EasyPanel entrega variables por entorno.
+// v6.7: sin dotenv obligatorio; RUT compatible con AliDropship y regiones sin tildes.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -59,6 +59,14 @@ function safeCompare(a = '', b = '') {
 function normalizeText(value = '') {
   return String(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 }
+function removeDiacritics(value = '') {
+  return String(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+function normalizeRegionForAli(value = '') {
+  let s = removeDiacritics(value).replace(/\bRegi[oó]n\b/gi, '').replace(/\s+/g, ' ').trim();
+  if (/metropolitana/i.test(s)) return 'Metropolitana de Santiago';
+  return s;
+}
 function hashKey(value) { return crypto.createHash('sha1').update(String(value)).digest('hex'); }
 async function cacheGet(key) {
   if (redisReady) {
@@ -95,7 +103,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v6.4', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v6.7-alidropship-rut-region', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -157,19 +165,37 @@ function loadComunas() {
 const comunas = loadComunas();
 const comunaMap = new Map(comunas.map((x) => [normalizeText(x.comuna), x.postcode]));
 function getPostcode(comuna, fallback = '8320000') { return comunaMap.get(normalizeText(comuna)) || fallback; }
-const regiones = loadRegiones().map((r) => ({ ...r, comunas: (r.comunas || []).map((nombre) => ({ comuna: nombre, postcode: getPostcode(nombre, process.env.DEFAULT_POSTCODE || '8320000') })) }));
+const rawRegiones = loadRegiones();
+const regiones = rawRegiones.map((r) => ({
+  ...r,
+  region_original: r.region,
+  region: normalizeRegionForAli(r.region),
+  comunas: (r.comunas || []).map((nombre) => ({ comuna: nombre, postcode: getPostcode(nombre, process.env.DEFAULT_POSTCODE || '8320000') }))
+}));
 const comunaRegionMap = new Map();
-for (const region of regiones) for (const c of region.comunas) comunaRegionMap.set(normalizeText(c.comuna), { codigo: region.codigo, region: region.region });
+for (const region of regiones) for (const c of region.comunas) comunaRegionMap.set(normalizeText(c.comuna), { codigo: region.codigo, region: region.region, region_original: region.region_original });
 const regionMapByCode = new Map(regiones.map((r) => [String(r.codigo || '').toUpperCase(), r]));
-const regionMapByName = new Map(regiones.map((r) => [normalizeText(r.region || ''), r]));
+const regionMapByName = new Map();
+for (const r of regiones) {
+  regionMapByName.set(normalizeText(r.region || ''), r);
+  regionMapByName.set(normalizeText(r.region_original || ''), r);
+}
 
 const RUT_META_KEYS = [
-  '_billing_rut', 'billing_rut', 'rut', '_rut',
-  'billing_run', '_billing_run', 'run', '_run',
-  'billing_dni', '_billing_dni', 'dni', '_dni',
-  'billing_document', '_billing_document', 'billing_documento', '_billing_documento',
-  'billing_document_number', '_billing_document_number', 'document_number', '_document_number',
-  'billing_tax_id', '_billing_tax_id', 'tax_id', '_tax_id'
+  '_billing_rut', 'billing_rut', '_shipping_rut', 'shipping_rut',
+  'rut', '_rut', 'run', '_run',
+  'billing_run', '_billing_run', 'shipping_run', '_shipping_run',
+  'billing_dni', '_billing_dni', 'shipping_dni', '_shipping_dni', 'dni', '_dni',
+  'billing_document', '_billing_document', 'shipping_document', '_shipping_document',
+  'billing_documento', '_billing_documento', 'shipping_documento', '_shipping_documento',
+  'billing_document_number', '_billing_document_number', 'shipping_document_number', '_shipping_document_number',
+  'document_number', '_document_number',
+  'billing_tax_id', '_billing_tax_id', 'shipping_tax_id', '_shipping_tax_id', 'tax_id', '_tax_id',
+  'cpf', '_cpf', 'billing_cpf', '_billing_cpf', 'shipping_cpf', '_shipping_cpf',
+  'code_number', '_code_number', 'billing_code_number', '_billing_code_number', 'shipping_code_number', '_shipping_code_number',
+  'rut_code', '_rut_code', 'billing_rut_code', '_billing_rut_code', 'shipping_rut_code', '_shipping_rut_code',
+  'rut-code', '_rut-code', 'billing-rut-code', '_billing-rut-code', 'shipping-rut-code', '_shipping-rut-code',
+  'rutCode', '_rutCode', 'billingRutCode', '_billingRutCode', 'shippingRutCode', '_shippingRutCode'
 ];
 
 function getMetaValue(metaData = [], keys = []) {
@@ -182,30 +208,41 @@ function getMetaValue(metaData = [], keys = []) {
 }
 
 function mergeMetaData(meta = []) {
-  const out = [];
-  const seen = new Set();
+  // Ultimo valor gana. Asi los aliases AliDropship que agregamos reemplazan valores vacios o antiguos enviados desde el frontend.
+  const map = new Map();
   for (const item of meta || []) {
     if (!item || !item.key) continue;
     const k = String(item.key);
     const nk = normalizeText(k);
-    if (seen.has(nk)) continue;
-    seen.add(nk);
-    out.push({ key: k, value: item.value });
+    map.set(nk, { key: k, value: item.value });
   }
-  return out;
+  return Array.from(map.values());
 }
 
 function buildRutMeta(rutFormatted) {
   if (!rutFormatted) return [];
   const clean = String(rutFormatted).replace(/\./g, '').replace(/-/g, '').toUpperCase();
   const withDash = rutFormatted;
+  // AliDropship muestra RUT en Chile, pero al armar address usa cpf/code_number.
+  // Guardamos los aliases con formato humano y limpio para que el plugin pueda leer cualquiera.
+  const formattedKeys = [
+    '_billing_rut','billing_rut','_shipping_rut','shipping_rut','rut','_rut','run','_run',
+    'billing_run','_billing_run','shipping_run','_shipping_run','billing_dni','_billing_dni','shipping_dni','_shipping_dni',
+    'billing_document','_billing_document','shipping_document','_shipping_document','billing_documento','_billing_documento','shipping_documento','_shipping_documento',
+    'billing_tax_id','_billing_tax_id','shipping_tax_id','_shipping_tax_id','rut-code','_rut-code','billing-rut-code','_billing-rut-code','shipping-rut-code','_shipping-rut-code'
+  ];
+  const cleanKeys = [
+    'cpf','_cpf','billing_cpf','_billing_cpf','shipping_cpf','_shipping_cpf',
+    'code_number','_code_number','billing_code_number','_billing_code_number','shipping_code_number','_shipping_code_number',
+    'rut_code','_rut_code','billing_rut_code','_billing_rut_code','shipping_rut_code','_shipping_rut_code',
+    'rutCode','_rutCode','billingRutCode','_billingRutCode','shippingRutCode','_shippingRutCode',
+    '_billing_rut_clean','billing_rut_clean','_shipping_rut_clean','shipping_rut_clean','rut_clean','_rut_clean'
+  ];
   return [
-    ...RUT_META_KEYS.map((key) => ({ key, value: withDash })),
-    { key: '_billing_rut_clean', value: clean },
-    { key: 'billing_rut_clean', value: clean }
+    ...formattedKeys.map((key) => ({ key, value: withDash })),
+    ...cleanKeys.map((key) => ({ key, value: clean }))
   ];
 }
-
 function resolveRegionInfo(regionInput = '', comuna = '') {
   const raw = String(regionInput || '').trim();
   const codeCandidate = raw.toUpperCase();
@@ -222,7 +259,7 @@ function resolveRegionInfo(regionInput = '', comuna = '') {
 
 function regionStateValue(info) {
   if (process.env.CHILE_STATE_FORMAT === 'code') return info.codigo || '';
-  return info.region || info.codigo || '';
+  return normalizeRegionForAli(info.region || info.codigo || '');
 }
 
 async function initDb() {
@@ -674,5 +711,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v6.2 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v6.7 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });
