@@ -356,7 +356,7 @@ function normalizeCheckout(body) {
   };
 }
 
-app.get('/health', (req, res) => res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-pro-v4', cache_items: memoryCache.size, redis: Boolean(redis), postgres: Boolean(pgPool), dbReady }));
+app.get('/health', (req, res) => res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-pro-v5', cache_items: memoryCache.size, redis: Boolean(redis), postgres: Boolean(pgPool), dbReady }));
 app.get('/comunas', (req, res) => res.json({ comunas }));
 app.get('/regiones', (req, res) => res.json({ regiones }));
 app.get('/cache/status', (req, res) => res.json({ ok: true, items: memoryCache.size, keys: Array.from(memoryCache.keys()) }));
@@ -415,6 +415,27 @@ async function buildProductsCatalog(includeVariations=true) {
   await upsertProductsIndex(normalized);
   return normalized;
 }
+
+async function buildProductsPage({ q='', limit=30, offset=0 } = {}) {
+  const page = Math.floor(Number(offset || 0) / Number(limit || 30)) + 1;
+  const params = { per_page: Math.min(Number(limit || 30), 100), page, status: 'publish' };
+  if (q) params.search = q;
+  const { data } = await wc.get('/products', { params });
+  const normalized = [];
+  const concurrency = Number(process.env.VARIATION_CONCURRENCY || 4);
+  let idx = 0;
+  async function worker() {
+    while (idx < data.length) {
+      const prod = data[idx++];
+      const variations = prod.type === 'variable' ? await getVariations(prod.id) : [];
+      normalized.push(normalizeProduct(prod, variations));
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, data.length)) }, worker));
+  normalized.sort((a,b) => String(a.nombre).localeCompare(String(b.nombre), 'es'));
+  return { productos: normalized, total: page * Number(limit || 30) + (data.length === Number(limit || 30) ? 1 : 0), source: 'woocommerce_page' };
+}
+
 function filterProductsLocal(products, { q='', category='', sale=false, stock='', limit=60, offset=0 } = {}) {
   const nq = normalizeText(q);
   let filtered = products.filter(p => {
@@ -441,13 +462,19 @@ app.get('/productos', async (req, res, next) => {
 
 app.get('/productos/search', async (req, res, next) => {
   try {
-    const params = { q: String(req.query.q || '').trim(), category: String(req.query.category || '').trim(), sale: req.query.sale === 'true', stock: String(req.query.stock || ''), limit: Math.min(Number(req.query.limit || 60), 120), offset: Number(req.query.offset || 0) };
+    const params = { q: String(req.query.q || '').trim(), category: String(req.query.category || '').trim(), sale: req.query.sale === 'true', stock: String(req.query.stock || ''), limit: Math.min(Number(req.query.limit || 30), 80), offset: Number(req.query.offset || 0) };
     let result = await searchProductsIndex(params);
     let cached = false;
     if (!result) {
-      const catalog = await remember('productos:with-variations', CACHE_TTL_PRODUCTS, () => buildProductsCatalog(true), false);
-      cached = catalog.cached;
-      result = filterProductsLocal(catalog.value, params);
+      const cachedCatalog = await cacheGet('productos:with-variations');
+      if (cachedCatalog) {
+        cached = true;
+        result = filterProductsLocal(cachedCatalog, params);
+      } else {
+        result = await buildProductsPage(params);
+        await upsertProductsIndex(result.productos);
+        if (params.category || params.sale || params.stock === 'instock') result = filterProductsLocal(result.productos, { ...params, offset: 0 });
+      }
     }
     res.json({ ...result, cached, limit: params.limit, offset: params.offset });
   } catch (error) { next(error); }
@@ -464,9 +491,11 @@ app.post('/productos/sync', async (req, res, next) => {
 
 app.get('/categorias', async (req, res, next) => {
   try {
-    const cached = await remember('productos:with-variations', CACHE_TTL_PRODUCTS, () => buildProductsCatalog(true), false);
-    const categorias = [...new Set(cached.value.flatMap(p => p.categorias || []))].sort((a,b)=>a.localeCompare(b,'es'));
-    res.json({ categorias, cached: cached.cached });
+    const result = await remember('categorias:wc', CACHE_TTL_PRODUCTS, async () => {
+      const { data } = await wc.get('/products/categories', { params: { per_page: 100, hide_empty: false } });
+      return data.map(c => c.name).filter(Boolean).sort((a,b)=>a.localeCompare(b,'es'));
+    }, req.query.refresh === 'true');
+    res.json({ categorias: result.value, cached: result.cached });
   } catch (error) { next(error); }
 });
 

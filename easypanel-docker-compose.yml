@@ -1,0 +1,30 @@
+services:
+  panel:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://panel:panel_password@postgres:5432/paneldb
+    depends_on:
+      - redis
+      - postgres
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: panel
+      POSTGRES_PASSWORD: panel_password
+      POSTGRES_DB: paneldb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+volumes:
+  redis_data:
+  postgres_data:

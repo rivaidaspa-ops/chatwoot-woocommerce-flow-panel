@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Panel Pro Chile v4 · WooCommerce + Chatwoot + Flow</title>
+  <title>Panel Pro Chile v5 · Chatwoot App + WooCommerce + Flow</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -24,12 +24,12 @@
   <main id="app" class="app hidden">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Chatwoot App Panel Chile v4</p>
-        <h1>Checkout chileno, búsqueda rápida, Redis/Postgres, variaciones y caché</h1>
-        <p class="muted">Redis + PostgreSQL opcional para indexar productos y acelerar búsqueda por SKU, nombre, categoría y ofertas.</p>
+        <p class="eyebrow">Chatwoot App Panel Chile v5</p>
+        <h1>Panel interno para Chatwoot con catálogo rápido, checkout chileno y variaciones visuales</h1>
+        <p class="muted">Docker listo con Redis + PostgreSQL para indexar catálogo, buscar por SKU/nombre/categoría/oferta y cargar por páginas sin bloquear Chatwoot.</p>
       </div>
       <div class="top-actions">
-        <button id="syncProductsBtn" class="secondary">Sincronizar catálogo</button><button id="refreshProductsBtn" class="secondary">Refrescar búsqueda</button>
+        <button id="syncProductsBtn" class="secondary">Sincronizar catálogo</button><button id="refreshProductsBtn" class="secondary">Actualizar vista</button>
         <button id="clearCacheBtn" class="ghost">Limpiar caché</button>
         <button id="logoutBtn" class="ghost">Cerrar sesión</button>
       </div>
@@ -89,7 +89,7 @@
       </div>
       <div id="loadingOverlay" class="loading-overlay hidden"><div class="spinner"></div><strong>Cargando productos...</strong><span id="loadingDetail">Preparando búsqueda rápida</span></div>
       <div id="productsList" class="products-list muted">Sin productos cargados.</div>
-      <div class="load-more-row"><button id="loadMoreBtn" class="secondary hidden">Cargar más productos</button></div>
+      <div class="load-more-row"><button id="loadMoreBtn" class="secondary hidden">Ver más productos</button><span id="loadMoreInfo" class="muted"></span></div>
     </section>
   </main>
   <script src="app.js"></script>

@@ -98,58 +98,91 @@ function renderOrders() {
   if (!state.pedidos.length) { $('ordersList').innerHTML = '<span class="muted">Este cliente no registra pedidos.</span>'; return; }
   $('ordersList').innerHTML = state.pedidos.map(o => `<article class="order-card"><div class="order-head"><div><h3>Pedido #${text(o.numero)}</h3><p class="muted">${new Date(o.fecha).toLocaleDateString('es-CL')} · ${text(o.metodo_pago || 'Sin método')} · RUT ${text(o.rut || 'N/D')}</p></div><span class="badge ${text(o.estado)}">${text(o.estado)}</span></div><p class="price">${money(o.total)}</p><p class="muted">${text((o.productos || []).map(p => `${p.cantidad}x ${p.nombre}`).join(', '))}</p></article>`).join('');
 }
-function variationLabel(v) { return (v.atributos || []).filter(a => a.option).map(a => `${a.name}: ${a.option}`).join(' · ') || v.sku || `Variación ${v.id}`; }
+function variationLabel(v) {
+  return (v.atributos || []).filter(a => a.option && !isNoisyAttribute(a.name)).map(a => `${a.name}: ${a.option}`).join(' · ') || v.sku || `Variación ${v.id}`;
+}
 function isNoisyAttribute(name='') {
   const n = normalize(name);
-  return ['size_info','sizelist','sizes','ali','aliexpress','shipping','logistics','product chemical','producto quimico','origen','cn','lugar aplicable','numero de modelo'].some(x => n.includes(x));
+  return ['size_info','sizelist','sizes','ali','aliexpress','shipping','logistics','product chemical','producto quimico','origen','cn','fujian','lugar aplicable','numero de modelo','model','department','departamento','material superior'].some(x => n.includes(x));
 }
 function visibleAttributes(product) {
-  return (product.atributos || [])
+  const preferred = ['color','talla','marca','genero','género','material'];
+  const attrs = (product.atributos || [])
     .filter(a => a && a.name && !isNoisyAttribute(a.name))
-    .filter(a => Array.isArray(a.options) && a.options.length && JSON.stringify(a.options).length < 280)
-    .slice(0, 10);
+    .filter(a => Array.isArray(a.options) && a.options.length && JSON.stringify(a.options).length < 220);
+  attrs.sort((a,b)=> (preferred.some(x=>normalize(a.name).includes(x)) ? -1 : 1) - (preferred.some(x=>normalize(b.name).includes(x)) ? -1 : 1));
+  return attrs.slice(0, 6);
 }
 function variationImage(product, variation) { return variation?.imagen || product.imagen || product.imagenes?.[0]?.src || ''; }
 function formatVariationOption(v) {
   const attrs = (v.atributos || []).filter(a => a.option && !isNoisyAttribute(a.name)).map(a => `${a.name}: ${a.option}`).join(' · ');
-  return `${attrs || v.sku || 'Variación'} · SKU ${v.sku || 'N/D'} · Stock ${v.stock ?? v.stock_status} · ${money(v.precio)}`;
+  return `${attrs || v.sku || 'Variación'} · ${money(v.precio)}`;
+}
+function productSearchString(p) { return normalize([p.nombre,p.sku,(p.etiquetas||[]).join(' '),(p.categorias||[]).join(' '),(p.atributos||[]).map(a=>`${a.name} ${(a.options||[]).join(' ')}`).join(' '),(p.variations||[]).map(v=>`${v.sku} ${variationLabel(v)}`).join(' '),JSON.stringify(p.meta||{})].join(' ')); }
+function selectedVariation(product) {
+  const variations = product.variations || [];
+  if (!variations.length) return null;
+  const explicit = $(`var-${product.id}`)?.value || '';
+  if (explicit) return variations.find(v => String(v.id) === String(explicit)) || variations[0];
+  const selected = {};
+  document.querySelectorAll(`[data-var-attr][data-product-id="${product.id}"]`).forEach(sel => { selected[sel.dataset.varAttr] = sel.value; });
+  const exact = variations.find(v => (v.atributos || []).filter(a=>!isNoisyAttribute(a.name)).every(a => !selected[a.name] || selected[a.name] === a.option));
+  return exact || variations[0];
+}
+function uniqueVariationAttributes(product) {
+  const map = new Map();
+  for (const v of product.variations || []) {
+    for (const a of v.atributos || []) {
+      if (!a.name || !a.option || isNoisyAttribute(a.name)) continue;
+      if (!map.has(a.name)) map.set(a.name, new Set());
+      map.get(a.name).add(a.option);
+    }
+  }
+  return Array.from(map.entries()).slice(0, 3).map(([name, set]) => ({ name, options: Array.from(set) }));
 }
 function updateVariationPreview(productId) {
   const product = state.productos.find(p => String(p.id) === String(productId)); if (!product) return;
   const variation = selectedVariation(product);
+  const hidden = $(`var-${product.id}`); if (hidden && variation) hidden.value = variation.id;
   const img = $(`main-img-${product.id}`); if (img) img.src = variationImage(product, variation);
   const price = $(`price-${product.id}`); if (price) price.textContent = money(variation?.precio || product.precio);
   const meta = $(`meta-${product.id}`); if (meta) meta.textContent = `SKU: ${variation?.sku || product.sku || 'Sin SKU'} · Stock: ${variation?.stock ?? product.stock ?? product.stock_status} · ${variation ? 'Variación seleccionada' : 'Producto simple'}`;
-  const selected = $(`selected-${product.id}`); if (selected) selected.textContent = variation ? variationLabel(variation) : '';
+  const selected = $(`selected-${product.id}`); if (selected) selected.innerHTML = variation ? `<strong>${text(variationLabel(variation))}</strong><small>SKU ${text(variation.sku || 'N/D')} · Stock ${text(variation.stock ?? variation.stock_status)} · ${money(variation.precio)}</small>` : '';
+  const vImg = $(`variation-img-${product.id}`); if (vImg) vImg.src = variationImage(product, variation);
 }
-function productSearchString(p) { return normalize([p.nombre,p.sku,(p.etiquetas||[]).join(' '),(p.categorias||[]).join(' '),(p.atributos||[]).map(a=>`${a.name} ${(a.options||[]).join(' ')}`).join(' '),(p.variations||[]).map(v=>`${v.sku} ${variationLabel(v)}`).join(' '),JSON.stringify(p.meta||{})].join(' ')); }
-function selectedVariation(product) { const id = $(`var-${product.id}`)?.value || ''; return (product.variations || []).find(v => String(v.id) === String(id)) || null; }
-
 function renderProducts(append=false) {
-  const filtered = state.productos;
   const variationCount = state.productos.reduce((s,p)=>s+(p.variations||[]).length,0);
   $('metricProducts').textContent = state.productTotal || state.productos.length;
   $('metricVariations').textContent = variationCount;
-  $('loadMoreBtn')?.classList.toggle('hidden', state.productos.length >= state.productTotal || !state.productTotal);
-  if (!filtered.length && !append) { $('productsList').innerHTML = '<span class="muted">No hay productos disponibles para la búsqueda.</span>'; return; }
-  const html = filtered.map(p => {
+  const hasMore = state.productTotal && state.productos.length < state.productTotal;
+  $('loadMoreBtn')?.classList.toggle('hidden', !hasMore);
+  if ($('loadMoreInfo')) $('loadMoreInfo').textContent = state.productTotal ? `${state.productos.length} de ${state.productTotal} productos cargados` : '';
+  if (!state.productos.length && !append) { $('productsList').innerHTML = '<span class="muted">No hay productos disponibles para la búsqueda.</span>'; return; }
+  const html = state.productos.map(p => {
     const variations = p.variations || [];
     const defaultVariation = variations[0] || null;
-    const attrBadges = visibleAttributes(p).map(a => `<span class="mini">${text(a.name)}: ${text((a.options||[]).join(', '))}</span>`).join('');
-    const tagBadges = (p.etiquetas || []).slice(0,4).map(t => `<span class="mini tag">${text(t)}</span>`).join('');
-    const cats = (p.categorias || []).slice(0,3).map(c => `<span class="mini ali">${text(c)}</span>`).join('');
+    const attrBadges = visibleAttributes(p).map(a => `<span class="mini">${text(a.name)}: ${text((a.options||[]).slice(0,6).join(', '))}</span>`).join('');
+    const tagBadges = (p.etiquetas || []).slice(0,3).map(t => `<span class="mini tag">${text(t)}</span>`).join('');
+    const cats = (p.categorias || []).slice(0,2).map(c => `<span class="mini ali">${text(c)}</span>`).join('');
     const mainImage = variationImage(p, defaultVariation);
     const thumbs = [p.imagen, ...(p.imagenes || []).map(i=>i.src), ...variations.map(v=>v.imagen)].filter(Boolean);
-    const uniqueThumbs = [...new Set(thumbs)].slice(0,5).map(src => `<button class="thumb" type="button" data-thumb="${p.id}" data-src="${text(src)}"><img src="${text(src)}" alt="${text(p.nombre)}" loading="lazy"></button>`).join('');
+    const uniqueThumbs = [...new Set(thumbs)].slice(0,8).map((src,i) => `<button class="thumb ${i===0?'active':''}" type="button" data-thumb="${p.id}" data-src="${text(src)}"><img src="${text(src)}" alt="${text(p.nombre)}" loading="lazy"></button>`).join('');
     const imageBlock = mainImage ? `<div class="main-product-image"><img id="main-img-${p.id}" src="${text(mainImage)}" alt="${text(p.nombre)}" loading="lazy"></div><div class="thumb-row">${uniqueThumbs}</div>` : '<div class="no-img">Sin imagen</div>';
-    const varSelect = variations.length ? `<label class="variation-box"><span>Seleccionar variación</span><select id="var-${p.id}" class="variation-select" data-product-id="${p.id}">${variations.map(v => `<option value="${v.id}">${text(formatVariationOption(v))}</option>`).join('')}</select><small id="selected-${p.id}" class="selected-variation">${text(defaultVariation ? variationLabel(defaultVariation) : '')}</small></label>` : '<p class="muted">Producto simple</p>';
-    return `<article class="product-card"><div class="gallery">${imageBlock}</div><div><div class="product-head"><div><h3>${text(p.nombre)}</h3><p id="meta-${p.id}" class="muted">SKU: ${text(defaultVariation?.sku || p.sku)} · Stock: ${text(defaultVariation?.stock ?? p.stock ?? p.stock_status)} · ${variations.length ? 'Producto variable' : 'Producto simple'}</p></div><span id="price-${p.id}" class="price">${money(defaultVariation?.precio || p.precio)}</span></div><div class="badges">${cats}${attrBadges}${tagBadges}</div>${varSelect}<div class="product-actions"><input id="qty-${p.id}" class="qty" type="number" min="1" value="1"><button data-add="${p.id}">Agregar</button><button class="secondary" data-send="${p.id}">Enviar a conversación</button></div></div></article>`;
+    const varAttrs = uniqueVariationAttributes(p);
+    const attrSelectors = varAttrs.map(a => `<label>${text(a.name)}<select data-var-attr="${text(a.name)}" data-product-id="${p.id}">${a.options.map(opt => `<option value="${text(opt)}">${text(opt)}</option>`).join('')}</select></label>`).join('');
+    const fallbackSelect = variations.length ? `<select id="var-${p.id}" class="variation-select hidden" data-product-id="${p.id}">${variations.map(v => `<option value="${v.id}">${text(formatVariationOption(v))}</option>`).join('')}</select>` : '';
+    const varBlock = variations.length ? `<div class="variation-panel"><div class="variation-panel-title"><span>Elegir variación</span><span>${variations.length} opciones</span></div><div class="variation-grid">${attrSelectors || `<label>Variación<select id="var-${p.id}" class="variation-select" data-product-id="${p.id}">${variations.map(v => `<option value="${v.id}">${text(formatVariationOption(v))}</option>`).join('')}</select></label>`}</div>${attrSelectors ? fallbackSelect : ''}<div class="variation-summary"><img id="variation-img-${p.id}" src="${text(mainImage)}" alt="Variación"><span id="selected-${p.id}"><strong>${text(defaultVariation ? variationLabel(defaultVariation) : '')}</strong><small>SKU ${text(defaultVariation?.sku || p.sku || 'N/D')} · Stock ${text(defaultVariation?.stock ?? p.stock ?? p.stock_status)} · ${money(defaultVariation?.precio || p.precio)}</small></span></div></div>` : '<p class="muted">Producto simple</p>';
+    const stockVal = defaultVariation?.stock ?? p.stock ?? p.stock_status;
+    const inStock = String(defaultVariation?.stock_status || p.stock_status).includes('instock') || Number(stockVal) > 0;
+    return `<article class="product-card"><div class="product-media">${imageBlock}<span class="stock-chip ${inStock?'ok':'no'}">Stock ${text(stockVal ?? 'N/D')}</span></div><div class="product-body"><div class="product-head"><div><h3>${text(p.nombre)}</h3><p id="meta-${p.id}" class="product-sku">SKU: ${text(defaultVariation?.sku || p.sku)} · ${variations.length ? 'Variable' : 'Simple'}</p></div><span id="price-${p.id}" class="price">${money(defaultVariation?.precio || p.precio)}</span></div><div class="badges">${cats}${attrBadges}${tagBadges}</div>${varBlock}<div class="product-actions"><input id="qty-${p.id}" class="qty" type="number" min="1" value="1"><button data-add="${p.id}">Agregar</button><button class="secondary" data-send="${p.id}">Enviar a conversación</button></div></div></article>`;
   }).join('');
   $('productsList').innerHTML = html;
   document.querySelectorAll('.variation-select').forEach(sel => sel.addEventListener('change', () => updateVariationPreview(sel.dataset.productId)));
-  document.querySelectorAll('[data-thumb]').forEach(btn => btn.addEventListener('click', () => { const img = $(`main-img-${btn.dataset.thumb}`); if (img) img.src = btn.dataset.src; }));
+  document.querySelectorAll('[data-var-attr]').forEach(sel => sel.addEventListener('change', () => updateVariationPreview(sel.dataset.productId)));
+  document.querySelectorAll('[data-thumb]').forEach(btn => btn.addEventListener('click', () => { const img = $(`main-img-${btn.dataset.thumb}`); if (img) img.src = btn.dataset.src; document.querySelectorAll(`[data-thumb="${btn.dataset.thumb}"]`).forEach(x=>x.classList.remove('active')); btn.classList.add('active'); }));
   document.querySelectorAll('[data-add]').forEach(btn => btn.addEventListener('click', () => { const p = state.productos.find(x => String(x.id) === btn.dataset.add); addToCart(p, Math.max(1, Number($(`qty-${p.id}`).value || 1)), selectedVariation(p)); }));
   document.querySelectorAll('[data-send]').forEach(btn => btn.addEventListener('click', async () => { const p = state.productos.find(x => String(x.id) === btn.dataset.send); try { await sendToConversation(p, Math.max(1, Number($(`qty-${p.id}`).value || 1)), selectedVariation(p)); } catch(e) { alert(e.message); } }));
+  state.productos.forEach(p => { if ((p.variations||[]).length) updateVariationPreview(p.id); });
 }
 function addToCart(product, quantity, variation=null) { const key = `${product.id}:${variation?.id || 0}`; const ex = state.cart.find(i => i.key === key); if (ex) ex.quantity += quantity; else state.cart.push({ key, product, variation, quantity }); renderCart(); }
 function removeFromCart(key) { state.cart = state.cart.filter(i => i.key !== key); renderCart(); }
