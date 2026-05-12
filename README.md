@@ -22,3 +22,22 @@ git push
 ```
 
 En EasyPanel usar Dockerfile, ruta `/`, proxy al puerto 3001.
+
+
+## v7 - Link de pago WooCommerce con Flow
+
+La opción recomendada es crear el pedido en WooCommerce con el método de pago activo de Flow y generar el link de pago de WooCommerce. El cliente paga en el checkout/order-pay de WooCommerce y el plugin de Flow instalado en Woo se encarga de Webpay/Flow.
+
+Endpoints nuevos:
+
+- `POST /pedidos/:id/link-pago-woo`: actualiza el pedido con el gateway seleccionado y devuelve el link de pago WooCommerce.
+- `GET /pedidos/:id/link-pago-woo`: devuelve el link de pago del pedido sin modificarlo.
+- `POST /pagar` ahora usa WooCommerce si `PAYMENT_LINK_PROVIDER=woocommerce`; Flow directo queda como alternativa.
+
+Variables nuevas recomendadas:
+
+- `PUBLIC_BASE_URL`: dominio publico del panel.
+- `WOO_FLOW_GATEWAY_ID`: ID del gateway Flow en WooCommerce, por ejemplo `flow`.
+- `WOO_FLOW_GATEWAY_TITLE`: titulo visible del metodo.
+- `PAYMENT_LINK_PROVIDER=woocommerce`: usa links de pago WooCommerce en vez de Flow directo.
+- `PANEL_APP_TOKEN`: token para abrir el panel desde Chatwoot sin popup Basic Auth.

@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Panel Pro Chile v6.9 · Chatwoot App + WooCommerce + Flow</title>
+  <title>Panel Pro Chile v7 · Chatwoot App + WooCommerce Flow</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9Oer+R5cUdJsd6I4kyXgFomIhA8B8pYx2Q0zM3r2u6i5a" crossorigin="anonymous" />
-  <link rel="stylesheet" href="styles.css?v=6.9" />
+  <link rel="stylesheet" href="styles.css?v=7.0" />
 </head>
 <body>
   <main id="loginScreen" class="login-screen">
@@ -25,9 +25,9 @@
   <main id="app" class="app hidden">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Chatwoot App Panel Chile v6.9</p>
-        <h1>Panel comercial para Chatwoot con pedidos editables, búsqueda avanzada, RUT limpio y link de pago Flow</h1>
-        <p class="muted">Bootstrap UI moderna, Redis + PostgreSQL, métodos de pago WooCommerce automáticos, pedidos editables y Flow.</p>
+        <p class="eyebrow">Chatwoot App Panel Chile v7</p>
+        <h1>Panel comercial para Chatwoot con pedidos editables, RUT limpio y link de pago WooCommerce con Flow</h1>
+        <p class="muted">Bootstrap UI moderna, Redis + PostgreSQL, métodos de pago WooCommerce automáticos y link de pago generado desde Woo.</p>
       </div>
       <div class="top-actions btn-toolbar gap-2">
         <div class="theme-controls" aria-label="Preferencias de interfaz"><select id="themeMode" title="Tema"><option value="light">Tema claro</option><option value="dark">Tema oscuro</option><option value="compact">Tema compacto</option><option value="luxury">Tema premium</option><option value="contrast">Alto contraste</option></select><select id="themeAccent" title="Color de botones"><option value="teal">Teal</option><option value="blue">Azul</option><option value="green">Verde</option><option value="slate">Grafito</option><option value="orange">Naranjo</option><option value="purple">Morado</option><option value="cyan">Cyan</option><option value="rose">Rosa</option><option value="black">Negro solo botones</option></select></div>
@@ -53,7 +53,7 @@
     <section class="grid two">
       <article class="card shadow-sm"><h2>Cliente</h2><div id="clientInfo" class="muted">Ingrese un email para cargar información.</div></article>
       <article class="card checkout-card shadow-sm">
-        <div class="section-title"><h2>Checkout Chile</h2><span class="pill">CLP · Flow/Webpay</span></div>
+        <div class="section-title"><h2>Checkout Chile</h2><span class="pill">CLP · WooCommerce Flow</span></div>
         <div class="checkout-grid">
           <input id="billingFirstName" placeholder="Nombre" />
           <input id="billingLastName" placeholder="Apellido" />
@@ -69,7 +69,7 @@
         <p id="rutStatus" class="mini muted-line">RUT pendiente de validar</p><p class="rut-help">El RUT se guarda solo en campos esenciales: <strong>billing_rut</strong> y <strong>shipping_rut</strong>.</p>
         <textarea id="customerNote" placeholder="Nota del pedido / instrucciones de despacho"></textarea>
         <div id="cartBox" class="cart-box muted">Seleccione productos o variaciones para el pedido.</div>
-        <div class="actions"><button id="createOrderBtn">Crear pedido</button><button id="payBtn" class="secondary">Generar pago Flow</button></div>
+        <div class="actions"><button id="createOrderBtn">Crear pedido</button><button id="payBtn" class="secondary">Generar link de pago Woo</button></div>
         <p id="orderStatus" class="status-text"></p>
       </article>
     </section>
@@ -88,7 +88,7 @@
 
     <section class="card orders-section">
       <div class="section-title">
-        <div><h2>Pedidos</h2><p class="muted">Busca, revisa lo que pidió el cliente, edita estado/nota, cancela/elimina y genera link de pago.</p></div>
+        <div><h2>Pedidos</h2><p class="muted">Busca, revisa lo que pidió el cliente, edita estado/nota, cancela/elimina y genera link de pago WooCommerce.</p></div>
         <button id="refreshOrdersBtn" class="secondary">Actualizar pedidos</button>
       </div>
       <div class="orders-toolbar">
@@ -120,14 +120,14 @@
         <div>
           <p class="eyebrow">Gestión de pedido</p>
           <h2 id="orderDrawerTitle">Detalle del pedido</h2>
-          <p id="orderDrawerSubtitle" class="muted">Revisa productos, edita estado/nota, cancela, elimina o genera link Flow.</p>
+          <p id="orderDrawerSubtitle" class="muted">Revisa productos, edita estado/nota, cancela, elimina o genera link de pago WooCommerce.</p>
         </div>
         <button id="closeOrderDrawerBtn" class="ghost" type="button">Volver</button>
       </header>
       <div id="orderDetailBody" class="order-drawer-body">Cargando pedido...</div>
       <footer class="order-drawer-footer">
         <button id="drawerBackBtn" class="ghost" type="button">Volver atrás</button>
-        <button id="flowOrderDrawerBtn" class="secondary" type="button">Generar link Flow</button>
+        <button id="flowOrderDrawerBtn" class="secondary" type="button">Generar link pago Woo</button>
         <button id="saveOrderBtn" type="button">Guardar cambios</button>
         <button id="cancelOrderBtn" class="warning" type="button">Cancelar pedido</button>
         <button id="deleteOrderBtn" class="danger" type="button">Eliminar pedido</button>
@@ -135,6 +135,6 @@
     </section>
   </aside>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
-  <script src="app.js?v=6.9"></script>
+  <script src="app.js?v=7.0"></script>
 </body>
 </html>

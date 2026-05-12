@@ -1,4 +1,4 @@
-// v6.9: navegación de pedidos con drawer, eliminar/cancelar, búsqueda y Flow mejorado.
+// v7.0: link de pago WooCommerce/Flow, variables limpias y Chatwoot App listo.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -103,7 +103,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v6.8-orders-flow-ui', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v7-woo-payment-link', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -146,6 +146,20 @@ function chatwootClient() {
 function formatWooError(error) {
   const data = error.response?.data;
   return data?.message || data?.error || error.message || 'Error inesperado';
+}
+
+function getOrderPayUrl(order = {}) {
+  const direct = order.payment_url || order.checkout_payment_url || order.pay_url || '';
+  if (direct) return direct;
+  const key = order.order_key || order.orderKey || '';
+  if (WC_URL && order.id && key) {
+    return `${WC_URL}/checkout/order-pay/${order.id}/?pay_for_order=true&key=${encodeURIComponent(key)}`;
+  }
+  return '';
+}
+
+function preferredWooPaymentGateway(body = {}) {
+  return body.gateway_id || body.payment_method || process.env.WOO_FLOW_GATEWAY_ID || process.env.WOO_PAYMENT_GATEWAY_ID || 'flow';
 }
 
 function loadRegiones() {
@@ -455,8 +469,8 @@ function normalizeCheckout(body) {
   ]);
 
   return {
-    payment_method: body.payment_method || 'flow',
-    payment_method_title: body.payment_method_title || 'Flow - Webpay / Multicaja',
+    payment_method: body.payment_method || process.env.WOO_FLOW_GATEWAY_ID || 'flow',
+    payment_method_title: body.payment_method_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Flow - Webpay / Multicaja',
     set_paid: false,
     status: body.status || 'pending',
     billing,
@@ -645,6 +659,37 @@ app.get('/pedidos/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.post('/pedidos/:id/link-pago-woo', async (req, res, next) => {
+  try {
+    const orderId = Number(req.params.id);
+    const gatewayId = preferredWooPaymentGateway(req.body || {});
+    const gatewayTitle = req.body?.payment_method_title || req.body?.gateway_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Flow - Webpay / Multicaja';
+
+    let order;
+    if (gatewayId) {
+      const updatePayload = { payment_method: gatewayId, payment_method_title: gatewayTitle, status: req.body?.status || 'pending' };
+      const updated = await wc.put(`/orders/${orderId}`, updatePayload);
+      order = updated.data;
+    } else {
+      const current = await wc.get(`/orders/${orderId}`);
+      order = current.data;
+    }
+
+    const url = getOrderPayUrl(order);
+    if (!url) return res.status(502).json({ error: 'WooCommerce no retorno link de pago. Verifique que el pedido tenga order_key y que Checkout esté activo.' });
+    res.json({ ok: true, provider: 'woocommerce', gateway_id: gatewayId, url, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
+  } catch (error) { next(error); }
+});
+
+app.get('/pedidos/:id/link-pago-woo', async (req, res, next) => {
+  try {
+    const { data: order } = await wc.get(`/orders/${Number(req.params.id)}`);
+    const url = getOrderPayUrl(order);
+    if (!url) return res.status(502).json({ error: 'WooCommerce no retorno link de pago.' });
+    res.json({ ok: true, provider: 'woocommerce', url, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
+  } catch (error) { next(error); }
+});
+
 app.patch('/pedidos/:id', async (req, res, next) => {
   try {
     const allowed = {};
@@ -686,19 +731,33 @@ app.post('/crear-pedido', async (req, res, next) => {
     const payload = normalizeCheckout(req.body);
     await validateStock(payload.line_items);
     const { data: order } = await wc.post('/orders', payload);
-    res.status(201).json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', checkout_url: order.payment_url || order.checkout_payment_url || order.pay_url || '' } });
+    res.status(201).json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', checkout_url: getOrderPayUrl(order), payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
   } catch (error) { next(error); }
 });
 app.post('/pagar', async (req, res, next) => {
   try {
+    const { orderId, amount, subject, email, mode } = req.body;
+    if (!orderId) return res.status(400).json({ error: 'orderId es obligatorio' });
+
+    if (mode === 'woocommerce' || process.env.PAYMENT_LINK_PROVIDER === 'woocommerce') {
+      const gatewayId = preferredWooPaymentGateway(req.body || {});
+      const gatewayTitle = req.body?.payment_method_title || req.body?.gateway_title || process.env.WOO_FLOW_GATEWAY_TITLE || 'Flow - Webpay / Multicaja';
+      const { data: order } = await wc.put(`/orders/${Number(orderId)}`, { payment_method: gatewayId, payment_method_title: gatewayTitle, status: 'pending' });
+      const url = getOrderPayUrl(order);
+      if (!url) return res.status(502).json({ error: 'WooCommerce no retorno link de pago.' });
+      return res.json({ ok: true, provider: 'woocommerce', url, pedido: { id: order.id, numero: order.number, total: order.total, moneda: order.currency || 'CLP', payment_method: order.payment_method, payment_method_title: order.payment_method_title } });
+    }
+
     if (!process.env.FLOW_API_KEY || !process.env.FLOW_SECRET_KEY) return res.status(400).json({ error: 'Faltan credenciales Flow' });
-    const { orderId, amount, subject, email } = req.body;
-    if (!orderId || !amount || !email) return res.status(400).json({ error: 'orderId, amount y email son obligatorios' });
+    if (!amount || !email) return res.status(400).json({ error: 'amount y email son obligatorios para Flow directo' });
     const publicBase = String(process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
-    const params = { apiKey: process.env.FLOW_API_KEY, commerceOrder: `${orderId}-${Date.now()}`, subject: subject || `Pedido WooCommerce #${orderId}`, currency: 'CLP', amount: Math.round(Number(amount)), email, paymentMethod: process.env.FLOW_PAYMENT_METHOD || '9', urlConfirmation: process.env.FLOW_URL_CONFIRMATION || `${publicBase}/flow/confirmacion`, urlReturn: process.env.FLOW_URL_RETURN || `${publicBase}/flow/retorno`, optional: JSON.stringify({ orderId }) };
+    const urlConfirmation = process.env.FLOW_URL_CONFIRMATION || `${publicBase}/flow/confirmacion`;
+    const urlReturn = process.env.FLOW_URL_RETURN || `${publicBase}/flow/retorno`;
+    if (!/^https:\/\/[^\s]+/i.test(urlConfirmation) || !/^https:\/\/[^\s]+/i.test(urlReturn)) return res.status(400).json({ error: 'FLOW_URL_CONFIRMATION y FLOW_URL_RETURN deben ser URLs publicas HTTPS validas.' });
+    const params = { apiKey: process.env.FLOW_API_KEY, commerceOrder: `${orderId}-${Date.now()}`, subject: subject || `Pedido WooCommerce #${orderId}`, currency: 'CLP', amount: Math.round(Number(amount)), email, paymentMethod: process.env.FLOW_PAYMENT_METHOD || '9', urlConfirmation, urlReturn, optional: JSON.stringify({ orderId }) };
     const { data } = await axios.post(`${FLOW_API_URL}/payment/create`, buildFlowPayload(params), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 20000 });
     if (!data?.url || !data?.token) return res.status(502).json({ error: 'Flow no retorno URL/token', detalle: data });
-    res.json({ ok: true, url: `${data.url}?token=${data.token}`, token: data.token, flow_order: data.flowOrder || null });
+    res.json({ ok: true, provider: 'flow_direct', url: `${data.url}?token=${data.token}`, token: data.token, flow_order: data.flowOrder || null });
   } catch (error) { next(error); }
 });
 app.post('/chatwoot/enviar-producto', async (req, res, next) => {
@@ -759,5 +818,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v6.9 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v7 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

@@ -73,11 +73,11 @@ async function testAuth() {
   catch { localStorage.removeItem('panelAuth'); if (!state.panelToken) showLogin(); else showLogin(); }
 }
 async function loadRegiones(force=false) {
-  const cached = !force && readLocal('regionesChileV69', 86400000 * 30);
+  const cached = !force && readLocal('regionesChileV70', 86400000 * 30);
   if (cached) { state.regiones = cached; renderRegionOptions(); return; }
   const data = await api('/regiones');
   state.regiones = data.regiones || [];
-  saveLocal('regionesChileV69', state.regiones);
+  saveLocal('regionesChileV70', state.regiones);
   renderRegionOptions();
 }
 async function loadCategorias(force=false) {
@@ -165,7 +165,7 @@ function renderOrders(list = state.pedidos) {
       <p class="muted order-products">${text(productos || 'Sin productos')}</p>
       <div class="order-actions">
         <button class="secondary tiny" data-view-order="${o.id}">Ver / editar</button>
-        <button class="tiny" data-flow-order="${o.id}">Link Flow</button>
+        <button class="tiny" data-flow-order="${o.id}">Link pago Woo</button>
         <button class="ghost tiny" data-cancel-order="${o.id}">Cancelar</button>
       </div>
     </article>`;
@@ -372,21 +372,20 @@ async function payOrder() {
   try {
     if (!state.lastOrder) await createOrder();
     if (!state.lastOrder) return;
-    const data = await api('/pagar', { method:'POST', body: JSON.stringify({ orderId:state.lastOrder.id, amount:state.lastOrder.total, email:$('customerEmail').value.trim(), subject:`Pedido #${state.lastOrder.numero}` }) });
+    const gatewayId = $('paymentMethod')?.value || '';
+    const gatewayTitle = $('paymentMethod')?.selectedOptions?.[0]?.textContent || gatewayId;
+    const data = await api(`/pedidos/${state.lastOrder.id}/link-pago-woo`, { method:'POST', body: JSON.stringify({ gateway_id: gatewayId, gateway_title: gatewayTitle }) });
     $('orderStatus').style.color = '#15803d';
-    $('orderStatus').innerHTML = `Link Flow generado: <a href="${text(data.url)}" target="_blank" rel="noopener">Abrir pago</a>`;
+    $('orderStatus').innerHTML = `Link de pago WooCommerce generado: <a href="${text(data.url)}" target="_blank" rel="noopener">Abrir pago</a>`;
+    await navigator.clipboard?.writeText(data.url).catch(()=>{});
     window.open(data.url, '_blank', 'noopener,noreferrer');
   } catch(e) { alert(e.message); }
 }
 async function createFlowForOrder(orderId) {
-  let order = state.pedidos.find(o => String(o.id) === String(orderId)) || state.orderSearchResults.find(o => String(o.id) === String(orderId));
   try {
-    if (!order || !order.email) {
-      const data = await api(`/pedidos/${orderId}`);
-      const p = data.pedido;
-      order = { id:p.id, numero:p.number, total:p.total, email:p.billing?.email || $('customerEmail').value.trim() };
-    }
-    const data = await api('/pagar', { method:'POST', body: JSON.stringify({ orderId: order.id, amount: order.total, email: order.email || $('customerEmail').value.trim(), subject:`Pedido #${order.numero || order.id}` }) });
+    const gatewayId = $('paymentMethod')?.value || '';
+    const gatewayTitle = $('paymentMethod')?.selectedOptions?.[0]?.textContent || gatewayId;
+    const data = await api(`/pedidos/${orderId}/link-pago-woo`, { method:'POST', body: JSON.stringify({ gateway_id: gatewayId, gateway_title: gatewayTitle }) });
     await navigator.clipboard?.writeText(data.url).catch(()=>{});
     if ($('orderFlowLink')) $('orderFlowLink').value = data.url;
     window.open(data.url, '_blank', 'noopener,noreferrer');
@@ -426,7 +425,7 @@ function renderOrderDrawer(p) {
     <section class="order-edit-panel">
       <label>Estado del pedido<select id="editOrderStatus">${orderStatusOptions(p.status)}</select></label>
       <label>Nota del pedido<textarea id="editOrderNote" placeholder="Nota visible en el pedido">${text(p.customer_note || '')}</textarea></label>
-      <label>Link de pago Flow<input id="orderFlowLink" readonly placeholder="Presiona Generar link Flow" /></label>
+      <label>Link de pago Flow<input id="orderFlowLink" readonly placeholder="Presiona Generar link pago Woo" /></label>
     </section>
     <section class="order-products-panel">
       <div class="panel-heading"><h3>Productos comprados</h3><span>${(p.line_items || []).length} ítems</span></div>
@@ -562,7 +561,7 @@ async function copyRecommendation() {
   alert('Respuesta copiada.');
 }
 
-async function clearCache() { localStorage.removeItem('regionesChileV69'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
+async function clearCache() { localStorage.removeItem('regionesChileV70'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/regiones'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('logoutBtn').addEventListener('click', ()=>{ localStorage.removeItem('panelAuth'); localStorage.removeItem('panelToken'); state.auth=''; state.panelToken=''; showLogin(); });
 $('loadBtn').addEventListener('click', () => loadPanel(false));
