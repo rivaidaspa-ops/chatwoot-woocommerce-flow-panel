@@ -1,20 +1,26 @@
 {
   "name": "chatwoot-woocommerce-flow-panel",
-  "version": "1.0.0",
-  "description": "Panel Chatwoot WooCommerce Flow Chile",
+  "version": "1.2.2",
+  "description": "Panel Chatwoot WooCommerce Flow Chile v6.2 sin dotenv obligatorio, Dockerfile EasyPanel, paginacion Redis PostgreSQL",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "nodemon server.js"
   },
   "dependencies": {
     "axios": "^1.7.9",
-    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "helmet": "^8.0.0",
-    "ioredis": "^5.4.2",
     "morgan": "^1.10.0",
+    "ioredis": "^5.4.2",
     "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
