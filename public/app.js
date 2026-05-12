@@ -17,6 +17,7 @@ const state = {
   syncTimer: null,
   themeMode: localStorage.getItem('panelThemeMode') || 'light',
   themeAccent: localStorage.getItem('panelThemeAccent') || 'teal',
+  orderSearchResults: [],
   recommendations: null
 };
 const $ = (id) => document.getElementById(id);
@@ -72,11 +73,11 @@ async function testAuth() {
   catch { localStorage.removeItem('panelAuth'); if (!state.panelToken) showLogin(); else showLogin(); }
 }
 async function loadRegiones(force=false) {
-  const cached = !force && readLocal('regionesChileV68', 86400000 * 30);
+  const cached = !force && readLocal('regionesChileV69', 86400000 * 30);
   if (cached) { state.regiones = cached; renderRegionOptions(); return; }
   const data = await api('/regiones');
   state.regiones = data.regiones || [];
-  saveLocal('regionesChileV68', state.regiones);
+  saveLocal('regionesChileV69', state.regiones);
   renderRegionOptions();
 }
 async function loadCategorias(force=false) {
@@ -149,16 +150,29 @@ function renderClient() {
   if (region) { $('billingRegion').value = region.codigo; renderComunas(region.codigo, d.city || ''); }
   updateRutStatus();
 }
-function renderOrders() {
-  setMetric('metricOrders', state.pedidos.length);
-  if (!state.pedidos.length) { $('ordersList').innerHTML = '<span class="muted">Este cliente no registra pedidos.</span>'; return; }
-  $('ordersList').innerHTML = state.pedidos.map(o => {
-    const productos = (o.productos || []).map(p => `${p.cantidad}x ${p.nombre}`).join(', ');
-    return `<article class="order-card order-card-modern"><div class="order-head"><div><h3>Pedido #${text(o.numero)}</h3><p class="muted">${new Date(o.fecha).toLocaleDateString('es-CL')} · ${text(o.metodo_pago || 'Sin metodo')} · RUT ${text(o.rut || 'N/D')}</p></div><span class="badge ${text(o.estado)}">${text(o.estado)}</span></div><p class="price">${money(o.total)}</p><p class="muted order-products">${text(productos || 'Sin productos')}</p><div class="order-actions"><button class="secondary tiny" data-view-order="${o.id}">Ver detalle</button><button class="ghost tiny" data-edit-order="${o.id}">Editar pedido</button><button class="tiny" data-flow-order="${o.id}">Link Flow</button></div></article>`;
+function renderOrders(list = state.pedidos) {
+  setMetric('metricOrders', list.length);
+  if (!list.length) { $('ordersList').innerHTML = '<span class="muted">Este cliente no registra pedidos o no hay resultados.</span>'; return; }
+  $('ordersList').innerHTML = list.map(o => {
+    const productos = (o.productos || []).map(p => `${p.cantidad || 1}x ${p.nombre}`).join(', ');
+    const fecha = o.fecha ? new Date(o.fecha).toLocaleDateString('es-CL') : 'Sin fecha';
+    return `<article class="order-card order-card-modern">
+      <div class="order-head">
+        <div><h3>Pedido #${text(o.numero || o.id)}</h3><p class="muted">${fecha} · ${text(o.metodo_pago || 'Sin método')} · ${text(o.email || '')}</p></div>
+        <span class="badge ${text(o.estado)}">${text(o.estado)}</span>
+      </div>
+      <p class="price">${money(o.total)}</p>
+      <p class="muted order-products">${text(productos || 'Sin productos')}</p>
+      <div class="order-actions">
+        <button class="secondary tiny" data-view-order="${o.id}">Ver / editar</button>
+        <button class="tiny" data-flow-order="${o.id}">Link Flow</button>
+        <button class="ghost tiny" data-cancel-order="${o.id}">Cancelar</button>
+      </div>
+    </article>`;
   }).join('');
   document.querySelectorAll('[data-view-order]').forEach(b => b.addEventListener('click', () => viewOrder(b.dataset.viewOrder)));
-  document.querySelectorAll('[data-edit-order]').forEach(b => b.addEventListener('click', () => editOrder(b.dataset.editOrder)));
   document.querySelectorAll('[data-flow-order]').forEach(b => b.addEventListener('click', () => createFlowForOrder(b.dataset.flowOrder)));
+  document.querySelectorAll('[data-cancel-order]').forEach(b => b.addEventListener('click', () => cancelOrderQuick(b.dataset.cancelOrder)));
 }
 function isNoisyAttribute(name='') {
   const n = normalize(name);
@@ -365,38 +379,129 @@ async function payOrder() {
   } catch(e) { alert(e.message); }
 }
 async function createFlowForOrder(orderId) {
-  const order = state.pedidos.find(o => String(o.id) === String(orderId));
-  if (!order) return alert('Pedido no encontrado en la vista.');
+  let order = state.pedidos.find(o => String(o.id) === String(orderId)) || state.orderSearchResults.find(o => String(o.id) === String(orderId));
   try {
-    const data = await api('/pagar', { method:'POST', body: JSON.stringify({ orderId: order.id, amount: order.total, email: order.billing?.email || $('customerEmail').value.trim(), subject:`Pedido #${order.numero}` }) });
+    if (!order || !order.email) {
+      const data = await api(`/pedidos/${orderId}`);
+      const p = data.pedido;
+      order = { id:p.id, numero:p.number, total:p.total, email:p.billing?.email || $('customerEmail').value.trim() };
+    }
+    const data = await api('/pagar', { method:'POST', body: JSON.stringify({ orderId: order.id, amount: order.total, email: order.email || $('customerEmail').value.trim(), subject:`Pedido #${order.numero || order.id}` }) });
     await navigator.clipboard?.writeText(data.url).catch(()=>{});
+    if ($('orderFlowLink')) $('orderFlowLink').value = data.url;
     window.open(data.url, '_blank', 'noopener,noreferrer');
   } catch(e) { alert(e.message); }
 }
+function orderStatusOptions(current='') {
+  const opts = [['pending','Pendiente'],['processing','Procesando'],['on-hold','En espera'],['completed','Completado'],['cancelled','Cancelado'],['refunded','Reembolsado'],['failed','Fallido']];
+  return opts.map(([v,l]) => `<option value="${v}" ${v===current?'selected':''}>${l}</option>`).join('');
+}
+function showOrderDrawer() {
+  const drawer = $('orderDrawer');
+  if (!drawer) return;
+  drawer.classList.remove('hidden');
+  drawer.setAttribute('aria-hidden','false');
+  document.body.classList.add('drawer-open');
+}
+function hideOrderDrawer() {
+  const drawer = $('orderDrawer');
+  if (!drawer) return;
+  drawer.classList.add('hidden');
+  drawer.setAttribute('aria-hidden','true');
+  document.body.classList.remove('drawer-open');
+}
+function renderOrderDrawer(p) {
+  const lines = (p.line_items || []).map(i => `<tr><td><strong>${text(i.name)}</strong><small class="muted d-block">ID ${text(i.product_id || '')}${i.variation_id ? ` · Var. ${text(i.variation_id)}` : ''}</small></td><td>${text(i.sku || '')}</td><td>${text(i.quantity)}</td><td>${money(i.total)}</td></tr>`).join('');
+  const rut = (p.meta_data || []).find(m => /rut/i.test(String(m.key)))?.value || '';
+  const address = [p.billing?.address_1,p.billing?.address_2,p.billing?.city,p.billing?.state,p.billing?.postcode].filter(Boolean).join(', ');
+  $('orderDrawerTitle').textContent = `Pedido #${p.number || p.id}`;
+  $('orderDrawerSubtitle').textContent = `${text(p.status)} · ${money(p.total)} · ${text(p.payment_method_title || 'Sin método')}`;
+  $('orderDetailBody').innerHTML = `<div class="order-detail-modern">
+    <div class="detail-grid order-detail-grid">
+      <div><span>Cliente</span><strong>${text(`${p.billing?.first_name || ''} ${p.billing?.last_name || ''}`.trim() || 'Sin nombre')}</strong><p>${text(p.billing?.email || '')}<br>${text(p.billing?.phone || '')}</p></div>
+      <div><span>Dirección</span><strong>${text(p.billing?.city || 'Sin comuna')}</strong><p>${text(address || 'Sin dirección')}</p></div>
+      <div><span>RUT</span><strong>${text(rut || 'No registrado')}</strong><p>Campo limpio para Woo/AliDropship</p></div>
+      <div><span>Total</span><strong>${money(p.total)}</strong><p>${text(p.currency || 'CLP')}</p></div>
+    </div>
+    <section class="order-edit-panel">
+      <label>Estado del pedido<select id="editOrderStatus">${orderStatusOptions(p.status)}</select></label>
+      <label>Nota del pedido<textarea id="editOrderNote" placeholder="Nota visible en el pedido">${text(p.customer_note || '')}</textarea></label>
+      <label>Link de pago Flow<input id="orderFlowLink" readonly placeholder="Presiona Generar link Flow" /></label>
+    </section>
+    <section class="order-products-panel">
+      <div class="panel-heading"><h3>Productos comprados</h3><span>${(p.line_items || []).length} ítems</span></div>
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Producto</th><th>SKU</th><th>Cant.</th><th>Total</th></tr></thead><tbody>${lines || '<tr><td colspan="4">Sin productos</td></tr>'}</tbody></table></div>
+    </section>
+    <p id="orderEditStatus" class="status-text"></p>
+  </div>`;
+}
 async function viewOrder(orderId) {
   try {
+    $('orderDetailBody').innerHTML = '<div class="drawer-loader"><div class="spinner"></div><strong>Cargando pedido...</strong></div>';
+    showOrderDrawer();
     const data = await api(`/pedidos/${orderId}`);
     state.selectedOrder = data.pedido;
-    const p = state.selectedOrder;
-    const lines = (p.line_items || []).map(i => `<tr><td>${text(i.name)}</td><td>${text(i.sku || '')}</td><td>${i.quantity}</td><td>${money(i.total)}</td></tr>`).join('');
-    $('orderDetailBody').innerHTML = `<div class="detail-grid"><div><strong>Cliente</strong><p>${text(p.billing?.first_name || '')} ${text(p.billing?.last_name || '')}<br>${text(p.billing?.email || '')}<br>${text(p.billing?.phone || '')}</p></div><div><strong>Dirección</strong><p>${text([p.billing?.address_1,p.billing?.address_2,p.billing?.city,p.billing?.state,p.billing?.postcode].filter(Boolean).join(', '))}</p></div><div><strong>Estado</strong><p>${text(p.status)}</p></div><div><strong>Total</strong><p>${money(p.total)}</p></div></div><table class="table table-sm"><thead><tr><th>Producto</th><th>SKU</th><th>Cant.</th><th>Total</th></tr></thead><tbody>${lines}</tbody></table><label>Nota del pedido<textarea id="editOrderNote">${text(p.customer_note || '')}</textarea></label><label>Estado<select id="editOrderStatus"><option value="pending">Pendiente</option><option value="processing">Procesando</option><option value="completed">Completado</option><option value="cancelled">Cancelado</option><option value="on-hold">En espera</option></select></label>`;
-    $('editOrderStatus').value = p.status;
-    showModal('orderModal');
-  } catch(e) { alert(e.message); }
+    renderOrderDrawer(state.selectedOrder);
+  } catch(e) { alert(e.message); hideOrderDrawer(); }
 }
 async function editOrder(orderId) { await viewOrder(orderId); }
 async function saveOrderEdits() {
   if (!state.selectedOrder) return;
+  const btn = $('saveOrderBtn');
   try {
-    const data = await api(`/pedidos/${state.selectedOrder.id}`, { method:'PATCH', body: JSON.stringify({ status:$('editOrderStatus').value, customer_note:$('editOrderNote').value }) });
-    alert(`Pedido #${data.pedido.numero} actualizado.`);
-    hideModal('orderModal');
+    btn.disabled = true;
+    const payload = { status:$('editOrderStatus').value, customer_note:$('editOrderNote').value };
+    const data = await api(`/pedidos/${state.selectedOrder.id}`, { method:'PATCH', body: JSON.stringify(payload) });
+    if ($('orderEditStatus')) { $('orderEditStatus').style.color = '#15803d'; $('orderEditStatus').textContent = `Pedido #${data.pedido.numero} actualizado.`; }
+    await viewOrder(state.selectedOrder.id);
+    await loadPanel(true);
+  } catch(e) { alert(e.message); }
+  finally { btn.disabled = false; }
+}
+async function cancelOrderQuick(orderId) {
+  if (!confirm('¿Cancelar este pedido?')) return;
+  await cancelOrder(orderId);
+}
+async function cancelSelectedOrder() {
+  if (!state.selectedOrder) return;
+  if (!confirm('¿Cancelar este pedido? Esta acción cambiará el estado a cancelado.')) return;
+  await cancelOrder(state.selectedOrder.id);
+  await viewOrder(state.selectedOrder.id);
+}
+async function cancelOrder(orderId) {
+  try {
+    await api(`/pedidos/${orderId}/cancelar`, { method:'POST', body: JSON.stringify({ customer_note:'Pedido cancelado desde panel Chatwoot.' }) });
     await loadPanel(true);
   } catch(e) { alert(e.message); }
 }
-function showModal(id) { const el=$(id); if (!el) return; if (window.bootstrap) bootstrap.Modal.getOrCreateInstance(el).show(); else el.classList.remove('hidden'); }
-function hideModal(id) { const el=$(id); if (!el) return; if (window.bootstrap) bootstrap.Modal.getOrCreateInstance(el).hide(); else el.classList.add('hidden'); }
-
+async function deleteSelectedOrder() {
+  if (!state.selectedOrder) return;
+  const msg = '¿Eliminar este pedido? Se moverá a la papelera de WooCommerce. Esta acción no borra forzado.';
+  if (!confirm(msg)) return;
+  try {
+    await api(`/pedidos/${state.selectedOrder.id}`, { method:'DELETE' });
+    hideOrderDrawer();
+    await loadPanel(true);
+  } catch(e) { alert(e.message); }
+}
+async function flowSelectedOrder() {
+  if (!state.selectedOrder) return;
+  await createFlowForOrder(state.selectedOrder.id);
+}
+async function searchOrders() {
+  const q = $('orderSearchInput')?.value?.trim() || '';
+  if (!q) return renderOrders(state.pedidos);
+  try {
+    const data = await api(`/pedidos/buscar?q=${encodeURIComponent(q)}&limit=30`);
+    state.orderSearchResults = data.pedidos || [];
+    renderOrders(state.orderSearchResults);
+  } catch(e) { alert(e.message); }
+}
+function clearOrderSearch() {
+  if ($('orderSearchInput')) $('orderSearchInput').value = '';
+  state.orderSearchResults = [];
+  renderOrders(state.pedidos);
+}
 async function applyLabels() { const conversationId = $('conversationId').value.trim(); const labels = $('labelInput').value.split(',').map(x=>x.trim()).filter(Boolean); if (!conversationId || !labels.length) return alert('Ingrese conversacion y etiquetas separadas por coma.'); await api('/chatwoot/etiquetas', { method:'POST', body: JSON.stringify({ conversationId, labels }) }); alert('Etiquetas aplicadas.'); }
 
 function applyThemeSettings() {
@@ -457,7 +562,7 @@ async function copyRecommendation() {
   alert('Respuesta copiada.');
 }
 
-async function clearCache() { localStorage.removeItem('regionesChileV68'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
+async function clearCache() { localStorage.removeItem('regionesChileV69'); await api('/cache/clear', { method:'POST', body:'{}' }); setLoadingState('Limpio'); alert('Cache limpiado.'); }
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault(); $('loginError').textContent=''; state.auth = btoa(`${$('loginUser').value.trim()}:${$('loginPassword').value}`); state.panelToken = ''; localStorage.removeItem('panelToken'); try { await api('/regiones'); localStorage.setItem('panelAuth', state.auth); await enterApp(); } catch { $('loginError').textContent = 'Credenciales incorrectas o servidor no disponible.'; state.auth=''; } });
 $('logoutBtn').addEventListener('click', ()=>{ localStorage.removeItem('panelAuth'); localStorage.removeItem('panelToken'); state.auth=''; state.panelToken=''; showLogin(); });
 $('loadBtn').addEventListener('click', () => loadPanel(false));
@@ -479,6 +584,15 @@ $('recommendBtn')?.addEventListener('click', recommendLabels);
 $('applyRecommendedLabelsBtn')?.addEventListener('click', applyRecommendedLabels);
 $('copyRecommendationBtn')?.addEventListener('click', copyRecommendation);
 $('saveOrderBtn')?.addEventListener('click', saveOrderEdits);
+$('closeOrderDrawerBtn')?.addEventListener('click', hideOrderDrawer);
+$('drawerBackBtn')?.addEventListener('click', hideOrderDrawer);
+$('orderDrawerBackdrop')?.addEventListener('click', hideOrderDrawer);
+$('cancelOrderBtn')?.addEventListener('click', cancelSelectedOrder);
+$('deleteOrderBtn')?.addEventListener('click', deleteSelectedOrder);
+$('flowOrderDrawerBtn')?.addEventListener('click', flowSelectedOrder);
+$('searchOrdersBtn')?.addEventListener('click', searchOrders);
+$('clearOrderSearchBtn')?.addEventListener('click', clearOrderSearch);
+$('orderSearchInput')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter') searchOrders(); });
 $('themeMode')?.addEventListener('change', () => updateTheme($('themeMode').value, $('themeAccent')?.value));
 $('themeAccent')?.addEventListener('change', () => updateTheme($('themeMode')?.value, $('themeAccent').value));
 applyThemeSettings();

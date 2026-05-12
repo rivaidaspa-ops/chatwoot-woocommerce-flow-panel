@@ -1,4 +1,4 @@
-// v6.8: UI moderna, RUT reducido, pedidos editables, metodos Woo y link Flow.
+// v6.9: navegación de pedidos con drawer, eliminar/cancelar, búsqueda y Flow mejorado.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -664,6 +664,23 @@ app.patch('/pedidos/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.post('/pedidos/:id/cancelar', async (req, res, next) => {
+  try {
+    const { data: order } = await wc.put(`/orders/${Number(req.params.id)}`, { status: 'cancelled', customer_note: req.body?.customer_note || undefined });
+    await cacheDelPrefix('cliente:');
+    res.json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP' } });
+  } catch (error) { next(error); }
+});
+
+app.delete('/pedidos/:id', async (req, res, next) => {
+  try {
+    const force = req.query.force === 'true';
+    const { data: order } = await wc.delete(`/orders/${Number(req.params.id)}`, { params: { force } });
+    await cacheDelPrefix('cliente:');
+    res.json({ ok: true, deleted: true, force, pedido: { id: order.id, numero: order.number || order.id, estado: order.status || 'trash' } });
+  } catch (error) { next(error); }
+});
+
 app.post('/crear-pedido', async (req, res, next) => {
   try {
     const payload = normalizeCheckout(req.body);
@@ -742,5 +759,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v6.8 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v6.9 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });
