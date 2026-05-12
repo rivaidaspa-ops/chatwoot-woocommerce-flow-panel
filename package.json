@@ -1,7 +1,7 @@
 {
   "name": "rivaida-commerce-hub",
-  "version": "8.6.2",
-  "description": "Rivaida Commerce Hub - Chatwoot, WooCommerce, Chile y Colombia sin cruce de tiendas",
+  "version": "8.6.4",
+  "description": "Rivaida Commerce Hub - Chatwoot, WooCommerce, imagenes adjuntas normalizadas para WhatsApp",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -16,7 +16,8 @@
     "morgan": "^1.10.0",
     "ioredis": "^5.4.2",
     "pg": "^8.13.1",
-    "form-data": "^4.0.1"
+    "form-data": "^4.0.1",
+    "sharp": "^0.33.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.9"

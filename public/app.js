@@ -1,4 +1,5 @@
-// v8.6.2 Rivaida Commerce Hub: deteccion automatica de tienda, Colombia aislado y stock con disponibles primero.
+// v8.6.4 Rivaida Commerce Hub: productos Colombia, tienda automatica, stock correcto e imagen Chatwoot normalizada.
+function normalizeStoreId(value='') { const raw = String(value || '').trim().toLowerCase(); if (raw === 'co' || raw === 'colombia') return 'co'; if (raw === 'cl' || raw === 'chile') return 'cl'; return raw; }
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -32,8 +33,9 @@ const state = {
   coupon: null,
   coupons: []
 };
+state.activeStore = normalizeStoreId(state.activeStore) || 'cl';
 const $ = (id) => document.getElementById(id);
-function currentStore(){ return state.stores.find(s => s.id === state.activeStore) || { id: state.activeStore, country: state.activeStore === 'co' ? 'CO' : 'CL', currency: state.activeStore === 'co' ? 'COP' : 'CLP', document_label: state.activeStore === 'co' ? 'CC / NIT' : 'RUT' }; }
+function currentStore(){ state.activeStore = normalizeStoreId(state.activeStore) || 'cl'; return state.stores.find(s => normalizeStoreId(s.id) === state.activeStore) || { id: state.activeStore, country: state.activeStore === 'co' ? 'CO' : 'CL', currency: state.activeStore === 'co' ? 'COP' : 'CLP', document_label: state.activeStore === 'co' ? 'CC / NIT' : 'RUT' }; }
 const money = (v) => `${Number(v || 0).toLocaleString(currentStore().country === 'CO' ? 'es-CO' : 'es-CL')} ${currentStore().currency || 'CLP'}`;
 const text = (v) => String(v ?? '').replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
 const normalize = (s='') => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
@@ -276,10 +278,11 @@ async function testAuth() {
   catch { localStorage.removeItem('panelAuth'); if (!state.panelToken) showLogin(); else showLogin(); }
 }
 function firstEnabledStoreId() {
-  return state.stores.find(s => s.enabled)?.id || '';
+  return normalizeStoreId(state.stores.find(s => s.enabled)?.id || '');
 }
 function isStoreEnabled(storeId = state.activeStore) {
-  const st = state.stores.find(s => s.id === storeId);
+  const target = normalizeStoreId(storeId) || 'cl';
+  const st = state.stores.find(s => normalizeStoreId(s.id) === target);
   return Boolean(st && st.enabled);
 }
 function configuredStoreNotice() {
@@ -288,13 +291,13 @@ function configuredStoreNotice() {
 }
 async function loadStores() {
   try {
-    const data = await api('/stores'); state.stores = data.stores || [];
-    const urlStore = new URLSearchParams(location.search).get('store') || '';
-    const savedStore = localStorage.getItem('activeStore') || '';
-    const contextStore = state.chatwootContext ? inferStoreFromChatwootContext(state.chatwootContext) : '';
+    const data = await api('/stores'); state.stores = (data.stores || []).map(s => ({ ...s, id: normalizeStoreId(s.id) || s.id }));
+    const urlStore = normalizeStoreId(new URLSearchParams(location.search).get('store') || '');
+    const savedStore = normalizeStoreId(localStorage.getItem('activeStore') || '');
+    const contextStore = normalizeStoreId(state.chatwootContext ? inferStoreFromChatwootContext(state.chatwootContext) : '');
     const wanted = urlStore || contextStore || savedStore || firstEnabledStoreId() || 'cl';
-    const exists = state.stores.find(s => s.id === wanted);
-    state.activeStore = exists ? wanted : (firstEnabledStoreId() || state.stores[0]?.id || 'cl');
+    const exists = state.stores.find(s => normalizeStoreId(s.id) === wanted);
+    state.activeStore = exists ? wanted : (firstEnabledStoreId() || normalizeStoreId(state.stores[0]?.id) || 'cl');
     if (!isStoreEnabled(state.activeStore)) {
       const fallback = firstEnabledStoreId();
       if (fallback && fallback !== state.activeStore) {
@@ -330,7 +333,7 @@ function applyStoreUI() {
   document.body.classList.add(`store-${st.id}`);
 }
 async function changeStore(storeId) {
-  state.activeStore = storeId || 'cl'; localStorage.setItem('activeStore', state.activeStore);
+  state.activeStore = normalizeStoreId(storeId) || 'cl'; localStorage.setItem('activeStore', state.activeStore);
   if ($('storeSelect')) $('storeSelect').value = state.activeStore;
   pushUiLog('info', 'Cambio de tienda', state.activeStore === 'co' ? 'Colombia' : 'Chile');
   state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.shippingMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null; state.selectedOrder=null; state.recommendations=null; state.coupon=null; state.regiones=[];
@@ -507,6 +510,9 @@ function productHasAvailableStock(product) {
   if (!product) return false;
   if (product.type === 'variable') {
     if (Array.isArray(product.variations) && product.variations.length) return product.variations.some(isStockValueOk);
+    // WooCommerce often marks the parent variable product as outofstock until variations are requested.
+    // Do not hide/sink Colombia variable products before the agent opens the variation modal.
+    if (Number(product.variation_count || 0) > 0) return true;
     return isStockValueOk(product);
   }
   return isStockValueOk(product);
@@ -514,6 +520,16 @@ function productHasAvailableStock(product) {
 function stockSortRank(product) { return productHasAvailableStock(product) ? 0 : 1; }
 function sortProductsByStockThenName(a, b) {
   return stockSortRank(a) - stockSortRank(b) || String(a.nombre || '').localeCompare(String(b.nombre || ''), 'es');
+}
+function productBelongsToActiveStore(product = {}) {
+  const active = normalizeStoreId(state.activeStore) || 'cl';
+  const sid = normalizeStoreId(product.store_id || product.store || product.tienda || '');
+  const country = normalizeStoreId(product.country || product.code || '');
+  if (!sid && !country) return true;
+  if (sid === active) return true;
+  if (active === 'co' && country === 'co') return true;
+  if (active === 'cl' && country === 'cl') return true;
+  return false;
 }
 function canAddProduct(product, variation=null) {
   if (!product) return { ok: false, reason: 'Producto no encontrado' };
@@ -736,7 +752,10 @@ async function loadProducts(force=false, append=false) {
     const data = await api(endpoint);
     if (expectedStore !== state.activeStore) { pushUiLog('warning','Catálogo descartado por cambio de tienda', `${expectedStore} → ${state.activeStore}`); return; }
     if (data.store && data.store !== state.activeStore) { notifyWarning('Catálogo descartado', `El servidor respondió ${data.store}, pero la tienda activa es ${state.activeStore}.`); return; }
-    let incoming = (data.productos || []).filter(p => !p.store_id || p.store_id === state.activeStore);
+    let incoming = (data.productos || []).map(p => ({ ...p, store_id: normalizeStoreId(p.store_id || p.store || data.store || state.activeStore) || state.activeStore, country: p.country || data.country || currentStore().country }));
+    const filteredByStore = incoming.filter(productBelongsToActiveStore);
+    if (filteredByStore.length || !incoming.length) incoming = filteredByStore;
+    else pushUiLog('warning', 'Catálogo sin filtro local de tienda', `Servidor respondió ${incoming.length} productos para ${data.store || state.activeStore}`);
     incoming = incoming.sort(sortProductsByStockThenName);
     state.productos = append ? [...state.productos, ...incoming] : incoming;
     state.productTotal = Number(data.total || state.productos.length);
