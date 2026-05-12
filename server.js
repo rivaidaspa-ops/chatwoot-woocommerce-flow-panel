@@ -1,4 +1,4 @@
-// v6.7: sin dotenv obligatorio; RUT compatible con AliDropship y regiones sin tildes.
+// v6.8: UI moderna, RUT reducido, pedidos editables, metodos Woo y link Flow.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -103,7 +103,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v6.7-alidropship-rut-region', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v6.8-orders-flow-ui', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -182,20 +182,8 @@ for (const r of regiones) {
 }
 
 const RUT_META_KEYS = [
-  '_billing_rut', 'billing_rut', '_shipping_rut', 'shipping_rut',
-  'rut', '_rut', 'run', '_run',
-  'billing_run', '_billing_run', 'shipping_run', '_shipping_run',
-  'billing_dni', '_billing_dni', 'shipping_dni', '_shipping_dni', 'dni', '_dni',
-  'billing_document', '_billing_document', 'shipping_document', '_shipping_document',
-  'billing_documento', '_billing_documento', 'shipping_documento', '_shipping_documento',
-  'billing_document_number', '_billing_document_number', 'shipping_document_number', '_shipping_document_number',
-  'document_number', '_document_number',
-  'billing_tax_id', '_billing_tax_id', 'shipping_tax_id', '_shipping_tax_id', 'tax_id', '_tax_id',
-  'cpf', '_cpf', 'billing_cpf', '_billing_cpf', 'shipping_cpf', '_shipping_cpf',
-  'code_number', '_code_number', 'billing_code_number', '_billing_code_number', 'shipping_code_number', '_shipping_code_number',
-  'rut_code', '_rut_code', 'billing_rut_code', '_billing_rut_code', 'shipping_rut_code', '_shipping_rut_code',
-  'rut-code', '_rut-code', 'billing-rut-code', '_billing-rut-code', 'shipping-rut-code', '_shipping-rut-code',
-  'rutCode', '_rutCode', 'billingRutCode', '_billingRutCode', 'shippingRutCode', '_shippingRutCode'
+  'billing_rut', '_billing_rut', 'shipping_rut', '_shipping_rut',
+  'rut', '_rut', 'run', '_run'
 ];
 
 function getMetaValue(metaData = [], keys = []) {
@@ -221,26 +209,12 @@ function mergeMetaData(meta = []) {
 
 function buildRutMeta(rutFormatted) {
   if (!rutFormatted) return [];
-  const clean = String(rutFormatted).replace(/\./g, '').replace(/-/g, '').toUpperCase();
-  const withDash = rutFormatted;
-  // AliDropship muestra RUT en Chile, pero al armar address usa cpf/code_number.
-  // Guardamos los aliases con formato humano y limpio para que el plugin pueda leer cualquiera.
-  const formattedKeys = [
-    '_billing_rut','billing_rut','_shipping_rut','shipping_rut','rut','_rut','run','_run',
-    'billing_run','_billing_run','shipping_run','_shipping_run','billing_dni','_billing_dni','shipping_dni','_shipping_dni',
-    'billing_document','_billing_document','shipping_document','_shipping_document','billing_documento','_billing_documento','shipping_documento','_shipping_documento',
-    'billing_tax_id','_billing_tax_id','shipping_tax_id','_shipping_tax_id','rut-code','_rut-code','billing-rut-code','_billing-rut-code','shipping-rut-code','_shipping-rut-code'
-  ];
-  const cleanKeys = [
-    'cpf','_cpf','billing_cpf','_billing_cpf','shipping_cpf','_shipping_cpf',
-    'code_number','_code_number','billing_code_number','_billing_code_number','shipping_code_number','_shipping_code_number',
-    'rut_code','_rut_code','billing_rut_code','_billing_rut_code','shipping_rut_code','_shipping_rut_code',
-    'rutCode','_rutCode','billingRutCode','_billingRutCode','shippingRutCode','_shippingRutCode',
-    '_billing_rut_clean','billing_rut_clean','_shipping_rut_clean','shipping_rut_clean','rut_clean','_rut_clean'
-  ];
+  // v6.8: solo campos esenciales para no llenar WooCommerce con campos personalizados duplicados.
   return [
-    ...formattedKeys.map((key) => ({ key, value: withDash })),
-    ...cleanKeys.map((key) => ({ key, value: clean }))
+    { key: 'billing_rut', value: rutFormatted },
+    { key: 'shipping_rut', value: rutFormatted },
+    { key: '_billing_rut', value: rutFormatted },
+    { key: '_shipping_rut', value: rutFormatted }
   ];
 }
 function resolveRegionInfo(regionInput = '', comuna = '') {
@@ -471,20 +445,13 @@ function normalizeCheckout(body) {
   billing.postcode = postcode; shipping.postcode = postcode;
   billing.city = comuna || billing.city; shipping.city = comuna || shipping.city;
 
+  const safeIncomingMeta = (body.meta_data || []).filter((m) => {
+    const k = normalizeText(m?.key || '');
+    return ['_chatwoot_conversation_id','chatwoot_conversation_id'].includes(k);
+  });
   const metaData = mergeMetaData([
-    ...(body.meta_data || []),
-    ...buildRutMeta(rutFormatted),
-    { key: '_billing_region', value: regionInfo.region || '' },
-    { key: 'billing_region', value: regionInfo.region || '' },
-    { key: '_billing_region_code', value: regionInfo.codigo || '' },
-    { key: 'billing_region_code', value: regionInfo.codigo || '' },
-    { key: '_shipping_region', value: regionInfo.region || '' },
-    { key: '_shipping_region_code', value: regionInfo.codigo || '' },
-    { key: '_billing_comuna', value: comuna || '' },
-    { key: 'billing_comuna', value: comuna || '' },
-    { key: '_shipping_comuna', value: comuna || '' },
-    { key: '_origen_pedido', value: 'Chatwoot WooCommerce Flow Panel' },
-    { key: '_integracion_chile_postcodes', value: 'billing_city/shipping_city + postcode automatico' }
+    ...safeIncomingMeta,
+    ...buildRutMeta(rutFormatted)
   ]);
 
   return {
@@ -585,7 +552,22 @@ app.get('/cliente', async (req, res, next) => {
       const regionFound = comunaRegionMap.get(normalizeText(billing.city || '')) || null;
       return {
         cliente: customer ? { id: customer.id, nombre: `${customer.first_name || ''} ${customer.last_name || ''}`.trim(), email: customer.email, telefono: billing.phone || '', rut: rutMeta || billing.rut || '', direccion: { ...billing, region_codigo: regionFound?.codigo || billing.state || '', region_nombre: regionFound?.region || billing.state || '' }, meta: extractMeta(customer.meta_data) } : { nombre: '', email, telefono: '', rut: '', direccion: {} },
-        pedidos: orders.map((order) => ({ id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', fecha: order.date_created, metodo_pago: order.payment_method_title, rut: getMetaValue(order.meta_data || [], RUT_META_KEYS) || '', productos: order.line_items?.map((item) => ({ nombre: item.name, cantidad: item.quantity, total: item.total, sku: item.sku, meta: item.meta_data })) || [], meta: extractMeta(order.meta_data) }))
+        pedidos: orders.map((order) => ({
+          id: order.id,
+          numero: order.number,
+          estado: order.status,
+          total: order.total,
+          moneda: order.currency || 'CLP',
+          fecha: order.date_created,
+          metodo_pago: order.payment_method_title,
+          payment_method: order.payment_method,
+          rut: getMetaValue(order.meta_data || [], RUT_META_KEYS) || '',
+          billing: order.billing || {},
+          shipping: order.shipping || {},
+          productos: order.line_items?.map((item) => ({ id: item.id, product_id: item.product_id, variation_id: item.variation_id, nombre: item.name, cantidad: item.quantity, total: item.total, subtotal: item.subtotal, sku: item.sku, meta: item.meta_data })) || [],
+          meta: extractMeta(order.meta_data),
+          customer_note: order.customer_note || ''
+        }))
       };
     }, force);
     res.json({ ...result.value, cached: result.cached });
@@ -633,12 +615,61 @@ app.get('/categorias', async (req, res, next) => {
     res.json({ categorias: result.value, cached: result.cached });
   } catch (error) { next(error); }
 });
+
+app.get('/payment-methods', async (req, res, next) => {
+  try {
+    const result = await remember('payment_gateways:wc', 3600, async () => {
+      const { data } = await wc.get('/payment_gateways');
+      return (data || []).filter((g) => g.enabled).map((g) => ({ id: g.id, title: g.title || g.method_title || g.id, description: cleanHtml(g.description || ''), enabled: g.enabled }));
+    }, req.query.refresh === 'true');
+    res.json({ methods: result.value, cached: result.cached });
+  } catch (error) { next(error); }
+});
+
+app.get('/pedidos/buscar', async (req, res, next) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const email = String(req.query.email || '').trim();
+    const params = { per_page: Math.min(Number(req.query.limit || 20), 50), orderby: 'date', order: 'desc' };
+    if (q) params.search = q;
+    if (email && !q) params.search = email;
+    const { data } = await wc.get('/orders', { params });
+    res.json({ pedidos: data.map((order) => ({ id: order.id, numero: order.number, estado: order.status, total: order.total, fecha: order.date_created, metodo_pago: order.payment_method_title, email: order.billing?.email || '', nombre: `${order.billing?.first_name || ''} ${order.billing?.last_name || ''}`.trim(), productos: order.line_items?.map((i) => ({ nombre: i.name, cantidad: i.quantity, total: i.total, sku: i.sku })) || [] })) });
+  } catch (error) { next(error); }
+});
+
+app.get('/pedidos/:id', async (req, res, next) => {
+  try {
+    const { data: order } = await wc.get(`/orders/${Number(req.params.id)}`);
+    res.json({ pedido: order });
+  } catch (error) { next(error); }
+});
+
+app.patch('/pedidos/:id', async (req, res, next) => {
+  try {
+    const allowed = {};
+    const body = req.body || {};
+    if (body.status) allowed.status = body.status;
+    if (body.customer_note !== undefined) allowed.customer_note = body.customer_note;
+    if (body.billing) allowed.billing = body.billing;
+    if (body.shipping) allowed.shipping = body.shipping;
+    if (Array.isArray(body.line_items)) {
+      await validateStock(body.line_items);
+      allowed.line_items = body.line_items.map((i) => ({ product_id: Number(i.product_id), variation_id: i.variation_id ? Number(i.variation_id) : undefined, quantity: Number(i.quantity) }));
+    }
+    if (body.rut && validateRut(body.rut)) allowed.meta_data = buildRutMeta(formatRut(body.rut));
+    const { data: order } = await wc.put(`/orders/${Number(req.params.id)}`, allowed);
+    await cacheDelPrefix('cliente:');
+    res.json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP' } });
+  } catch (error) { next(error); }
+});
+
 app.post('/crear-pedido', async (req, res, next) => {
   try {
     const payload = normalizeCheckout(req.body);
     await validateStock(payload.line_items);
     const { data: order } = await wc.post('/orders', payload);
-    res.status(201).json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', checkout_url: order.payment_url || order.checkout_payment_url || '' } });
+    res.status(201).json({ ok: true, pedido: { id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', checkout_url: order.payment_url || order.checkout_payment_url || order.pay_url || '' } });
   } catch (error) { next(error); }
 });
 app.post('/pagar', async (req, res, next) => {
@@ -711,5 +742,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v6.7 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v6.8 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

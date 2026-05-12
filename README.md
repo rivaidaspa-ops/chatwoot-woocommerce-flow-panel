@@ -119,3 +119,17 @@ Variables necesarias para Chatwoot:
 ## v6.7
 - AliDropship: RUT tambien se guarda como `billing_rut`, `shipping_rut`, `cpf` y `code_number`.
 - Regiones: nombres sin tildes para compatibilidad; `CL-RM` se muestra como `Metropolitana de Santiago`.
+
+## v6.8
+- RUT reducido: solo se envía en `billing_rut`, `_billing_rut`, `shipping_rut` y `_shipping_rut` para evitar llenar WooCommerce con campos personalizados duplicados.
+- Se eliminan alias `cpf`, `code_number` y equivalentes del envío nuevo.
+- Métodos de pago de WooCommerce cargados automáticamente desde `/payment_gateways`.
+- Link de pago Flow desde pedido creado o pedido existente.
+- Ver detalle de pedido y editar estado/nota desde el panel.
+- Interfaz Bootstrap más moderna para pedidos, checkout y catálogo.
+
+### Nuevos endpoints
+- `GET /payment-methods`
+- `GET /pedidos/buscar?q=texto&email=cliente@correo.cl`
+- `GET /pedidos/:id`
+- `PATCH /pedidos/:id`
