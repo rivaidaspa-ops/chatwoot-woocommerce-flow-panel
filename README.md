@@ -1,8 +1,8 @@
-# Rivaida Commerce Hub v8.4
+# Rivaida Commerce Hub v8.5
 
 Panel profesional para Chatwoot + WooCommerce con tiendas separadas Chile/Colombia.
 
-## Cambios v8.4
+## Cambios v8.5
 - Aislamiento fuerte por país/tienda: productos, carrito, pedidos, pagos, envíos, caché e índice separados por `store`.
 - Nombre profesional: **Rivaida Commerce Hub**.
 - Se eliminó el bloque de venta rápida Dropi de la interfaz principal.

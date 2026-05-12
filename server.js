@@ -1,4 +1,4 @@
-// v8.4 Rivaida Commerce Hub: aislamiento de tiendas Chile/Colombia, diagnosticos y logs.
+// v8.5 Rivaida Commerce Hub: estabilidad multi-pais, modales, diagnosticos, ayudas y stock seguro.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -11,6 +11,7 @@ const morgan = require('morgan');
 const Redis = require('ioredis');
 const { Pool } = require('pg');
 const FormData = require('form-data');
+const BOOT_ENV = { ...process.env };
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -105,7 +106,7 @@ function buildStoreConfig() {
   return merged;
 }
 let STORE_CONFIG = buildStoreConfig();
-function currentDefaultStore() { return String(getCfg('DEFAULT_STORE','cl')).toLowerCase(); }
+function currentDefaultStore() { return String(BOOT_ENV.DEFAULT_STORE || getCfg('DEFAULT_STORE','cl')).toLowerCase(); }
 const wcClients = new Map();
 function rebuildRuntimeConfig() { STORE_CONFIG = buildStoreConfig(); wcClients.clear(); allowedOrigins = parseAllowedOrigins(); }
 
@@ -165,7 +166,7 @@ let dbReady = false;
 let redisReady = false;
 let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
 const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.4.1';
+const APP_VERSION = '8.5.0';
 const appLogs = [];
 function addLog(level, message, data = {}) {
   const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
@@ -406,7 +407,10 @@ async function loadAppSettingsFromDb() {
   try {
     await ensureAppSettingsTable();
     const { rows } = await pgPool.query('SELECT key,value FROM app_settings');
-    for (const row of rows) process.env[row.key] = row.value;
+    for (const row of rows) {
+      if (row.key === 'DEFAULT_STORE' && BOOT_ENV.DEFAULT_STORE) continue;
+      process.env[row.key] = row.value;
+    }
     rebuildRuntimeConfig();
   } catch (e) { console.warn('[Settings load]', e.message); }
 }
@@ -606,6 +610,7 @@ async function buildProductsPage({ q='', limit=PRODUCT_PAGE_SIZE, offset=0 } = {
   const page = Math.floor(Number(offset || 0) / Number(limit || PRODUCT_PAGE_SIZE)) + 1;
   const params = { per_page: Math.min(Number(limit || PRODUCT_PAGE_SIZE), 100), page, status: 'publish' };
   if (q) params.search = q;
+  if (String(arguments[0]?.stock || '').toLowerCase() === 'instock') params.stock_status = 'instock';
   const response = await wc.get('/products', { params });
   const total = Number(response.headers['x-wp-total'] || 0);
   const normalized = response.data.map((p) => normalizeProduct(p, null, st)).sort((a,b)=>((b.stock_status === 'instock') - (a.stock_status === 'instock')) || String(a.nombre).localeCompare(String(b.nombre),'es'));
@@ -632,7 +637,7 @@ async function runCatalogSync(store = resolveStore(currentDefaultStore())) {
   addLog('info','Sincronización iniciada',{store:st.id});
   syncJob = { running: true, startedAt: new Date().toISOString(), finishedAt: null, page: 0, total: 0, indexed: 0, error: null };
   try {
-    await cacheDelPrefix('productos:');
+    await cacheDelPrefix(`productos:${st.id}:`);
     let page = 1;
     const perPage = Number(process.env.SYNC_PER_PAGE || 50);
     while (true) {
@@ -1374,10 +1379,21 @@ async function sendChatwootProductMessage(client, conversationId, content, img, 
   const wantsAttachment = img && getCfg('CHATWOOT_SEND_IMAGE_ATTACHMENT','true') !== 'false';
   if (wantsAttachment) {
     try {
-      const imageResp = await axios.get(img, { responseType: 'arraybuffer', timeout: Number(getCfg('IMAGE_FETCH_TIMEOUT_MS','15000')), maxContentLength: Number(getCfg('IMAGE_MAX_BYTES','8000000')) });
-      const mime = String(imageResp.headers['content-type'] || 'image/jpeg').split(';')[0];
+      const maxBytes = Number(getCfg('IMAGE_MAX_BYTES','4500000'));
+      const allowed = String(getCfg('CHATWOOT_ALLOWED_IMAGE_MIME','image/jpeg,image/png')).split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
+      const imageResp = await axios.get(img, {
+        responseType: 'arraybuffer',
+        timeout: Number(getCfg('IMAGE_FETCH_TIMEOUT_MS','15000')),
+        maxContentLength: maxBytes,
+        headers: { 'User-Agent': 'Rivaida-Commerce-Hub/8.5', 'Accept': 'image/jpeg,image/png,image/*;q=0.8,*/*;q=0.5' }
+      });
+      const mime = String(imageResp.headers['content-type'] || 'image/jpeg').split(';')[0].toLowerCase();
+      const size = Number(imageResp.data?.byteLength || 0);
       if (!mime.startsWith('image/')) throw new Error(`La URL no retorno imagen valida: ${mime}`);
-      const filename = `producto-${Date.now()}.${mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg'}`;
+      if (!allowed.includes(mime)) throw new Error(`Formato ${mime} no adjuntado para WhatsApp; se envia enlace. Use JPG/PNG para evitar error 131053.`);
+      if (size > maxBytes) throw new Error(`Imagen demasiado pesada (${size} bytes); se envia enlace para evitar error 131053.`);
+      const ext = mime.includes('png') ? 'png' : 'jpg';
+      const filename = `producto-${Date.now()}.${ext}`;
       const form = new FormData();
       form.append('content', content);
       form.append('message_type', 'outgoing');
@@ -1385,13 +1401,14 @@ async function sendChatwootProductMessage(client, conversationId, content, img, 
       form.append('content_type', 'text');
       form.append('content_attributes', JSON.stringify(contentAttributes || {}));
       form.append('attachments[]', Buffer.from(imageResp.data), { filename, contentType: mime });
-      const { data } = await client.post(`/conversations/${conversationId}/messages`, form, { headers: form.getHeaders() });
+      const { data } = await client.post(`/conversations/${conversationId}/messages`, form, { headers: form.getHeaders(), maxBodyLength: maxBytes + 1000000 });
       return { data, sentAsAttachment: true, imageFallback: false };
     } catch (e) {
+      addLog('warning','Imagen no adjuntada; se envia enlace seguro',{detail:e.response?.data ? JSON.stringify(e.response.data).slice(0,180) : e.message});
       console.warn('[Chatwoot imagen adjunta] fallback texto:', e.response?.data || e.message);
     }
   }
-  const fallbackContent = [content, img ? `Imagen: ${img}` : ''].filter(Boolean).join('\n');
+  const fallbackContent = [content, img ? `Imagen del producto: ${img}` : ''].filter(Boolean).join('\n');
   const { data } = await client.post(`/conversations/${conversationId}/messages`, {
     content: fallbackContent,
     message_type: 'outgoing',
