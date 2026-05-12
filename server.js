@@ -95,9 +95,38 @@ function loadComunas() {
     return { comuna: (comuna || '').trim(), postcode: (postcode || '').trim() };
   }).filter((x) => x.comuna && x.postcode);
 }
+
+function loadRegiones() {
+  const jsonPath = path.join(__dirname, 'data', 'regiones-comunas-chile.json');
+  if (!fs.existsSync(jsonPath)) return [];
+  return JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+}
 const comunas = loadComunas();
+const regionesBase = loadRegiones();
 const comunaMap = new Map(comunas.map((x) => [normalizeText(x.comuna), x.postcode]));
 function getPostcode(comuna, fallback = '8320000') { return comunaMap.get(normalizeText(comuna)) || fallback; }
+const regiones = regionesBase.map((r) => ({
+  ...r,
+  comunas: (r.comunas || []).map((nombre) => ({ comuna: nombre, postcode: getPostcode(nombre, process.env.DEFAULT_POSTCODE || '8320000') }))
+}));
+const comunaRegionMap = new Map();
+for (const region of regiones) for (const c of region.comunas) comunaRegionMap.set(normalizeText(c.comuna), { codigo: region.codigo, region: region.region });
+const memoryCache = new Map();
+const CACHE_TTL_PRODUCTS = Number(process.env.CACHE_TTL_PRODUCTS_MS || 300000);
+const CACHE_TTL_CLIENTE = Number(process.env.CACHE_TTL_CLIENTE_MS || 60000);
+function cacheGet(key) {
+  const item = memoryCache.get(key);
+  if (!item || item.expiresAt < Date.now()) { memoryCache.delete(key); return null; }
+  return item.value;
+}
+function cacheSet(key, value, ttlMs) { memoryCache.set(key, { value, expiresAt: Date.now() + ttlMs, createdAt: Date.now() }); return value; }
+async function remember(key, ttlMs, factory, force = false) {
+  if (!force) { const cached = cacheGet(key); if (cached) return { value: cached, cached: true }; }
+  const value = await factory();
+  cacheSet(key, value, ttlMs);
+  return { value, cached: false };
+}
+
 
 function validateRut(rut = '') {
   const clean = String(rut).replace(/\./g, '').replace(/-/g, '').trim().toUpperCase();
@@ -221,6 +250,8 @@ function normalizeCheckout(body) {
   const comuna = body.comuna || billing.city || shipping.city;
   const postcode = body.postcode || getPostcode(comuna, process.env.DEFAULT_POSTCODE || '8320000');
   billing.country = 'CL'; shipping.country = 'CL';
+  const region = body.region || body.region_codigo || billing.state || shipping.state || comunaRegionMap.get(normalizeText(comuna || ''))?.codigo || '';
+  billing.state = region; shipping.state = region;
   billing.postcode = postcode; shipping.postcode = postcode;
   billing.city = comuna || billing.city; shipping.city = comuna || shipping.city;
   return {
@@ -237,6 +268,8 @@ function normalizeCheckout(body) {
       ...(body.meta_data || []),
       { key: '_billing_rut', value: formatRut(rut) },
       { key: 'rut', value: formatRut(rut) },
+      { key: '_billing_region', value: region || '' },
+      { key: '_shipping_region', value: region || '' },
       { key: '_billing_comuna', value: comuna || '' },
       { key: '_shipping_comuna', value: comuna || '' },
       { key: '_origen_pedido', value: 'Chatwoot WooCommerce Flow Panel' }
@@ -244,49 +277,62 @@ function normalizeCheckout(body) {
   };
 }
 
-app.get('/health', (req, res) => res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-pro' }));
+app.get('/health', (req, res) => res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-pro-v2', cache_items: memoryCache.size }));
 app.get('/comunas', (req, res) => res.json({ comunas }));
+app.get('/regiones', (req, res) => res.json({ regiones }));
+app.get('/cache/status', (req, res) => res.json({ ok: true, items: memoryCache.size, keys: Array.from(memoryCache.keys()) }));
+app.post('/cache/clear', (req, res) => { memoryCache.clear(); res.json({ ok: true, message: 'Cache limpiado' }); });
 app.get('/validar-rut', (req, res) => res.json({ rut: formatRut(req.query.rut || ''), valido: validateRut(req.query.rut || '') }));
 
 app.get('/cliente', async (req, res, next) => {
   try {
     const email = String(req.query.email || req.query.email_cliente || '').trim().toLowerCase();
     if (!email) return res.status(400).json({ error: 'Debe indicar email del cliente' });
-    const { data: customers } = await wc.get('/customers', { params: { email, per_page: 1 } });
-    const customer = customers[0] || null;
-    const { data: orders } = await wc.get('/orders', { params: { search: email, per_page: 30, orderby: 'date', order: 'desc' } });
-    const billing = customer?.billing || {};
-    const rutMeta = customer?.meta_data?.find((m) => String(m.key).toLowerCase().includes('rut'))?.value || '';
-    res.json({
-      cliente: customer ? {
-        id: customer.id,
-        nombre: `${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
-        email: customer.email,
-        telefono: billing.phone || '',
-        rut: rutMeta || billing.rut || '',
-        direccion: billing,
-        meta: extractMeta(customer.meta_data)
-      } : { nombre: '', email, telefono: '', rut: '', direccion: {} },
-      pedidos: orders.map((order) => ({
-        id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', fecha: order.date_created,
-        metodo_pago: order.payment_method_title, rut: order.meta_data?.find((m) => String(m.key).toLowerCase().includes('rut'))?.value || '',
-        productos: order.line_items?.map((item) => ({ nombre: item.name, cantidad: item.quantity, total: item.total, sku: item.sku, meta: item.meta_data })) || [],
-        meta: extractMeta(order.meta_data)
-      }))
-    });
+    const force = req.query.refresh === 'true';
+    const result = await remember(`cliente:${email}`, CACHE_TTL_CLIENTE, async () => {
+      const { data: customers } = await wc.get('/customers', { params: { email, per_page: 1 } });
+      const customer = customers[0] || null;
+      const { data: orders } = await wc.get('/orders', { params: { search: email, per_page: 30, orderby: 'date', order: 'desc' } });
+      const billing = customer?.billing || {};
+      const rutMeta = customer?.meta_data?.find((m) => String(m.key).toLowerCase().includes('rut'))?.value || '';
+      const regionFound = comunaRegionMap.get(normalizeText(billing.city || '')) || null;
+      return {
+        cliente: customer ? {
+          id: customer.id,
+          nombre: `${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
+          email: customer.email,
+          telefono: billing.phone || '',
+          rut: rutMeta || billing.rut || '',
+          direccion: { ...billing, region_codigo: regionFound?.codigo || billing.state || '', region_nombre: regionFound?.region || billing.state || '' },
+          meta: extractMeta(customer.meta_data)
+        } : { nombre: '', email, telefono: '', rut: '', direccion: {} },
+        pedidos: orders.map((order) => ({
+          id: order.id, numero: order.number, estado: order.status, total: order.total, moneda: order.currency || 'CLP', fecha: order.date_created,
+          metodo_pago: order.payment_method_title, rut: order.meta_data?.find((m) => String(m.key).toLowerCase().includes('rut'))?.value || '',
+          productos: order.line_items?.map((item) => ({ nombre: item.name, cantidad: item.quantity, total: item.total, sku: item.sku, meta: item.meta_data })) || [],
+          meta: extractMeta(order.meta_data)
+        }))
+      };
+    }, force);
+    res.json({ ...result.value, cached: result.cached });
   } catch (error) { next(error); }
 });
 
 app.get('/productos', async (req, res, next) => {
   try {
     const includeVariations = req.query.variations !== 'false';
-    const products = await getAllProducts();
-    const normalized = [];
-    for (const p of products) {
-      const variations = includeVariations && p.type === 'variable' ? await getVariations(p.id) : [];
-      normalized.push(normalizeProduct(p, variations));
-    }
-    res.json({ productos: normalized });
+    const force = req.query.refresh === 'true';
+    const cacheKey = `productos:${includeVariations ? 'with-variations' : 'simple'}`;
+    const result = await remember(cacheKey, CACHE_TTL_PRODUCTS, async () => {
+      const products = await getAllProducts();
+      const normalized = [];
+      for (const p of products) {
+        const variations = includeVariations && p.type === 'variable' ? await getVariations(p.id) : [];
+        normalized.push(normalizeProduct(p, variations));
+      }
+      return normalized;
+    }, force);
+    res.json({ productos: result.value, cached: result.cached, cache_ttl_ms: CACHE_TTL_PRODUCTS });
   } catch (error) { next(error); }
 });
 

@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Panel Pro WooCommerce + Chatwoot + Flow</title>
+  <title>Panel Pro Chile v2 · WooCommerce + Chatwoot + Flow</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main id="loginScreen" class="login-screen">
     <section class="login-card">
-      <div class="brand-dot"></div>
+      <div class="brand-mark">CL</div>
       <h1>Panel seguro</h1>
-      <p>Login visual + Basic Auth. Ningún dato se carga antes de autenticar.</p>
+      <p>Login visual + Basic Auth. El panel no carga clientes, pedidos ni productos antes de autenticar.</p>
       <form id="loginForm">
         <label>Usuario<input id="loginUser" autocomplete="username" required /></label>
         <label>Contraseña<input id="loginPassword" type="password" autocomplete="current-password" required /></label>
@@ -23,9 +23,24 @@
 
   <main id="app" class="app hidden">
     <header class="topbar">
-      <div><p class="eyebrow">Chatwoot App Panel Chile</p><h1>Cliente, RUT, comunas, variaciones, atributos, pedidos y Flow</h1></div>
-      <button id="logoutBtn" class="ghost">Cerrar sesión</button>
+      <div>
+        <p class="eyebrow">Chatwoot App Panel Chile v2</p>
+        <h1>Checkout chileno, RUT, regiones, comunas, variaciones y caché</h1>
+        <p class="muted">Memoria en servidor + navegador para cargar más rápido productos, regiones y comunas.</p>
+      </div>
+      <div class="top-actions">
+        <button id="refreshProductsBtn" class="secondary">Refrescar productos</button>
+        <button id="clearCacheBtn" class="ghost">Limpiar caché</button>
+        <button id="logoutBtn" class="ghost">Cerrar sesión</button>
+      </div>
     </header>
+
+    <section class="metrics">
+      <article><strong id="metricProducts">0</strong><span>Productos</span></article>
+      <article><strong id="metricVariations">0</strong><span>Variaciones</span></article>
+      <article><strong id="metricOrders">0</strong><span>Pedidos cliente</span></article>
+      <article><strong id="metricCache">Sin caché</strong><span>Estado carga</span></article>
+    </section>
 
     <section class="search-card">
       <div><label>Email cliente</label><input id="customerEmail" placeholder="cliente@correo.cl" /></div>
@@ -35,8 +50,8 @@
 
     <section class="grid two">
       <article class="card"><h2>Cliente</h2><div id="clientInfo" class="muted">Ingrese un email para cargar información.</div></article>
-      <article class="card">
-        <div class="section-title"><h2>Checkout Chile</h2><span class="pill">CLP</span></div>
+      <article class="card checkout-card">
+        <div class="section-title"><h2>Checkout Chile</h2><span class="pill">CLP · Flow/Webpay</span></div>
         <div class="checkout-grid">
           <input id="billingFirstName" placeholder="Nombre" />
           <input id="billingLastName" placeholder="Apellido" />
@@ -44,11 +59,12 @@
           <input id="billingPhone" placeholder="Teléfono +56" />
           <input id="billingAddress" placeholder="Dirección / calle / número" />
           <input id="billingAddress2" placeholder="Depto, referencia, villa" />
-          <select id="billingComuna"></select>
+          <select id="billingRegion"><option value="">Seleccione región</option></select>
+          <select id="billingComuna" disabled><option value="">Seleccione comuna</option></select>
           <input id="billingPostcode" placeholder="Código postal" readonly />
-          <input id="billingRegion" placeholder="Región" />
           <select id="paymentMethod"><option value="flow">Flow - Webpay / Multicaja</option><option value="bacs">Transferencia bancaria</option><option value="cod">Pago contra entrega</option></select>
         </div>
+        <p id="rutStatus" class="mini muted-line">RUT pendiente de validar</p>
         <textarea id="customerNote" placeholder="Nota del pedido / instrucciones de despacho"></textarea>
         <div id="cartBox" class="cart-box muted">Seleccione productos o variaciones para el pedido.</div>
         <div class="actions"><button id="createOrderBtn">Crear pedido</button><button id="payBtn" class="secondary">Generar pago Flow</button></div>
@@ -57,14 +73,14 @@
     </section>
 
     <section class="card">
-      <div class="section-title"><h2>Chatwoot</h2><span class="muted">Etiquetas y mensajes directos a la conversación</span></div>
-      <div class="tag-row"><input id="labelInput" placeholder="Ej: pendiente_pago, interesado, rut_validado" /><button id="applyLabelsBtn" class="secondary">Aplicar etiquetas</button></div>
+      <div class="section-title"><h2>Chatwoot</h2><span class="muted">Etiquetas y mensaje directo a conversación</span></div>
+      <div class="tag-row"><input id="labelInput" placeholder="Ej: pendiente_pago, interesado, rut_validado, region_rm" /><button id="applyLabelsBtn" class="secondary">Aplicar etiquetas</button></div>
     </section>
 
     <section class="card"><h2>Pedidos</h2><div id="ordersList" class="orders-list muted">Sin pedidos cargados.</div></section>
 
     <section class="card">
-      <div class="section-title"><h2>Productos, variaciones y atributos</h2><input id="productFilter" placeholder="Buscar nombre, SKU, atributo o etiqueta" /></div>
+      <div class="section-title products-title"><div><h2>Productos, variaciones, atributos e imágenes</h2><p class="muted">Busca por nombre, SKU, atributo, etiqueta, talla, color o dato AliDropship.</p></div><input id="productFilter" placeholder="Buscar nombre, SKU, atributo o etiqueta" /></div>
       <div id="productsList" class="products-list muted">Sin productos cargados.</div>
     </section>
   </main>
