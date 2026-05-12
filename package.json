@@ -1,7 +1,7 @@
 {
   "name": "rivaida-commerce-hub",
-  "version": "8.6.7",
-  "description": "Rivaida Commerce Hub - rollback estable con Colombia aislado, cache sin 304 y debug productos",
+  "version": "8.6.8",
+  "description": "Rivaida Commerce Hub - aislamiento real Chile/Colombia, cache seguro de productos y debug activo",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

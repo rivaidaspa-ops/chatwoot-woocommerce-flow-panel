@@ -1,4 +1,4 @@
-// v8.6.7 Rivaida Commerce Hub: rollback estable, Colombia aislado, sin cache 304 para catálogo.
+// v8.6.8 Rivaida Commerce Hub: aislamiento real Chile/Colombia, cache de productos seguro y debug activo.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -186,7 +186,7 @@ let dbReady = false;
 let redisReady = false;
 let syncJob = { running: false, startedAt: null, finishedAt: null, page: 0, total: 0, indexed: 0, error: null, store: null };
 const APP_NAME = 'Rivaida Commerce Hub';
-const APP_VERSION = '8.6.7';
+const APP_VERSION = '8.6.8';
 const appLogs = [];
 function addLog(level, message, data = {}) {
   const entry = { time: new Date().toISOString(), level, message, store: data.store || data.store_id || '', detail: data.detail || data.error || '' };
@@ -243,6 +243,12 @@ async function cacheDelPrefix(prefix) {
         if (keys.length) await redis.del(keys);
       } while (cursor !== '0');
     } catch (e) { console.warn('[Redis del]', e.message); }
+  }
+}
+async function cacheDelExact(key) {
+  memoryCache.delete(key);
+  if (redisReady) {
+    try { await redis.del(key); } catch (e) { console.warn('[Redis del exact]', e.message); }
   }
 }
 async function remember(key, ttlSeconds, factory, force = false) {
@@ -568,6 +574,41 @@ function normalizeProduct(product, variations = null, store = null) {
     variations: Array.isArray(variations) ? variations : undefined
   };
 }
+function normalizeProductForStore(p = {}, store = null) {
+  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
+  return { ...p, store_id: st.id, store: st.id, country: st.country, moneda: st.currency || p.moneda, currency: st.currency || p.currency };
+}
+function payloadBelongsToStore(payload = {}, store = null) {
+  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
+  const products = Array.isArray(payload.productos) ? payload.productos : [];
+  const root = normalizeStoreId(payload.store_id || payload.store || '');
+  if (root && root !== st.id) return false;
+  return !products.some((p) => {
+    const raw = p?.store_id || p?.store || '';
+    const productStore = raw ? normalizeStoreId(raw) : st.id;
+    return productStore && productStore !== st.id;
+  });
+}
+function sanitizeProductsPayloadForStore(payload = {}, store = null) {
+  const st = store ? resolveStore(store.id || store) : resolveStore(currentDefaultStore());
+  const original = Array.isArray(payload.productos) ? payload.productos : [];
+  const clean = original
+    .filter((p) => {
+      const raw = p?.store_id || p?.store || '';
+      const productStore = raw ? normalizeStoreId(raw) : st.id;
+      return !productStore || productStore === st.id;
+    })
+    .map((p) => normalizeProductForStore(p, st));
+  return { ...payload, productos: clean, total: Number(payload.total || clean.length), store_id: st.id, store: st.id, country: st.country, currency: st.currency };
+}
+async function resolveProductsForStore(params, st) {
+  let found = await searchProductsIndex(params, st);
+  if (!found) {
+    found = await buildProductsPage(params, st);
+    if (params.category || params.sale || params.stock === 'instock') found = filterProductsLocal(found.productos, { ...params, offset: 0 });
+  }
+  return sanitizeProductsPayloadForStore(found || { productos: [], total: 0, source: 'empty' }, st);
+}
 function normalizeVariation(v) {
   return {
     id: v.id,
@@ -619,7 +660,7 @@ async function searchProductsIndex({ q='', category='', sale=false, stock='', li
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   values.push(Number(limit)); const limitIdx=values.length; values.push(Number(offset)); const offsetIdx=values.length;
   const { rows } = await pgPool.query(`SELECT payload, count(*) OVER() AS total FROM product_index ${where} ORDER BY CASE WHEN stock_status = 'instock' THEN 0 ELSE 1 END, nombre ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`, values);
-  return { productos: rows.map(r => r.payload), total: Number(rows[0]?.total || 0), source: 'postgres' };
+  return { productos: rows.map(r => normalizeProductForStore(r.payload || {}, st)), total: Number(rows[0]?.total || 0), source: 'postgres' };
 }
 async function getVariations(productId, store = resolveStore(currentDefaultStore()), force=false) {
   const st = resolveStore(store.id || store);
@@ -932,7 +973,7 @@ app.get('/regiones', (req, res) => { const st=storeFromReq(req); res.json({ stor
 app.get('/comunas', (req, res) => { const st=storeFromReq(req); const regs=getCountryRegions(st.country); const region=String(req.query.region||'').toUpperCase(); const selected=regs.find(r=>String(r.codigo).toUpperCase()===region||normalizeText(r.region)===normalizeText(req.query.region||'')); const comunasOut=selected?selected.comunas:regs.flatMap(r=>r.comunas||[]); res.json({ store:st.id, country:st.country, comunas:comunasOut }); });
 app.get('/validar-rut', (req, res) => res.json({ rut: formatRut(req.query.rut || ''), valido: validateRut(req.query.rut || '') }));
 app.get('/cache/status', async (req, res) => res.json({ ok: true, memory_items: memoryCache.size, redis: redisReady, postgres: dbReady, sync: syncJob }));
-app.post('/cache/clear', async (req, res) => { memoryCache.clear(); await cacheDelPrefix('productos:'); await cacheDelPrefix('cliente:'); await cacheDelPrefix('variations:'); res.json({ ok: true, message: 'Cache limpiado' }); });
+app.post('/cache/clear', async (req, res) => { const st = storeFromReq(req); memoryCache.clear(); await cacheDelPrefix('productos:'); await cacheDelPrefix(`productos:${st.id}:`); await cacheDelPrefix('cliente:'); await cacheDelPrefix('variations:'); await cacheDelPrefix('categorias:'); await cacheDelPrefix('payment_methods:'); await cacheDelPrefix('shipping_methods:'); res.json({ ok: true, store: st.id, message: 'Cache limpiado' }); });
 
 app.get('/cliente', async (req, res, next) => {
   try {
@@ -983,19 +1024,27 @@ app.get('/productos/search', async (req, res, next) => {
   try {
     const params = { q: String(req.query.q || '').trim(), category: String(req.query.category || '').trim(), sale: req.query.sale === 'true', stock: String(req.query.stock || ''), limit: Math.min(Number(req.query.limit || PRODUCT_PAGE_SIZE), MAX_PAGE_SIZE), offset: Number(req.query.offset || 0) };
     const st = storeFromReq(req);
-    const cacheKey = `productos:${st.id}:search:${hashKey(JSON.stringify(params))}`;
-    const force = req.query.refresh === 'true';
-    const result = await remember(cacheKey, PAGE_CACHE_SECONDS, async () => {
-      let found = await searchProductsIndex(params, st);
-      if (!found) {
-        found = await buildProductsPage(params, st);
-        if (params.category || params.sale || params.stock === 'instock') found = filterProductsLocal(found.productos, { ...params, offset: 0 });
-      }
-      return found;
-    }, force);
-    const payload = result.value || { productos: [], total: 0, source: 'empty' };
-    payload.productos = (payload.productos || []).map((p) => ({ ...p, store_id: normalizeStoreId(p.store_id || p.store || st.id), country: p.country || st.country }));
-    res.json({ ...payload, store:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count: await productIndexCount(st.id), sync:syncJob });
+    const cacheKey = `productos:${st.id}:search:${hashKey(JSON.stringify({ ...params, store: st.id, v: APP_VERSION }))}`;
+    const force = req.query.refresh === 'true' || req.query.nocache === 'true';
+    let result = await remember(cacheKey, PAGE_CACHE_SECONDS, async () => resolveProductsForStore(params, st), force);
+    let payload = sanitizeProductsPayloadForStore(result.value || { productos: [], total: 0, source: 'empty' }, st);
+
+    // Defensa contra cache viejo o contaminado: si Colombia recibe productos Chile, se borra esa clave y se recalcula sin cache.
+    if (!payloadBelongsToStore(payload, st)) {
+      await cacheDelExact(cacheKey);
+      result = { value: await resolveProductsForStore(params, st), cached: false };
+      payload = sanitizeProductsPayloadForStore(result.value || { productos: [], total: 0, source: 'empty' }, st);
+    }
+
+    const indexCount = await productIndexCount(st.id);
+    // Si hay indice para esta tienda pero el payload quedó vacío por una cache mala, reconstruye desde Postgres/Woo sin cache.
+    if ((!payload.productos || payload.productos.length === 0) && indexCount > 0 && Number(params.offset || 0) === 0) {
+      await cacheDelExact(cacheKey);
+      result = { value: await resolveProductsForStore(params, st), cached: false };
+      payload = sanitizeProductsPayloadForStore(result.value || { productos: [], total: 0, source: 'empty' }, st);
+    }
+
+    res.json({ ...payload, total: Number(payload.total || payload.productos.length || 0), store:st.id, store_id:st.id, country:st.country, currency:st.currency, cached:result.cached, limit:params.limit, offset:params.offset, redis:redisReady, postgres:dbReady, index_count:indexCount, sync:syncJob });
   } catch (error) { next(error); }
 });
 app.get('/productos/debug', async (req, res, next) => {
@@ -1007,7 +1056,7 @@ app.get('/productos/debug', async (req, res, next) => {
       const { rows } = await pgPool.query('SELECT id,nombre,sku,stock_status,store_id,precio,currency,payload FROM product_index WHERE store_id=$1 ORDER BY CASE WHEN stock_status=\'instock\' THEN 0 ELSE 1 END, nombre ASC LIMIT 8', [st.id]);
       sample = rows.map((r) => ({ id:r.id, nombre:r.nombre, sku:r.sku, stock_status:r.stock_status, store_id:r.store_id, precio:r.precio, payload_store:r.payload?.store_id || '', payload_country:r.payload?.country || '' }));
     }
-    res.json({ ok:true, version:APP_VERSION, store:st.id, country:st.country, currency:st.currency, enabled:Boolean(st.wc_url && st.wc_key && st.wc_secret), index_count, sample, sync:syncJob });
+    res.json({ ok:true, version:APP_VERSION, store:st.id, country:st.country, currency:st.currency, enabled:Boolean(st.wc_url && st.wc_key && st.wc_secret), index_count, sample, sync:syncJob, note:'Si index_count es mayor que 0 y /productos/search sale vacio, el problema era cache viejo o mezcla de tienda.' });
   } catch (error) { next(error); }
 });
 

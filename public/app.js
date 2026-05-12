@@ -239,8 +239,11 @@ function authHeaders() {
 }
 function pathWithStore(path) {
   if (!path.startsWith('/') || path.startsWith('/stores') || path.startsWith('/paises') || path.startsWith('/health') || path.startsWith('/diagnostics')) return path;
-  const sep = path.includes('?') ? '&' : '?';
-  return `${path}${sep}store=${encodeURIComponent(state.activeStore)}`;
+  const [base, qs=''] = path.split('?');
+  const params = new URLSearchParams(qs);
+  params.set('store', state.activeStore);
+  if (base.startsWith('/productos')) params.set('_ts', String(Date.now()));
+  return `${base}?${params.toString()}`;
 }
 function bodyWithStore(options = {}) {
   if (!options.body || typeof options.body !== 'string') return options.body;
@@ -637,7 +640,7 @@ function renderProducts() {
   setMetric('metricProducts', state.productos.length);
   const vCount = state.productos.reduce((s,p)=>s+Number(p.variation_count || (p.variations||[]).length || 0),0);
   setMetric('metricVariations', vCount);
-  if (!state.productos.length) { $('productsList').innerHTML = '<span class="muted">No hay productos para mostrar.</span>'; $('loadMoreBtn').classList.add('hidden'); return; }
+  if (!state.productos.length) { $('productsList').innerHTML = `<div class="empty-state"><strong>No hay productos para mostrar en ${text(currentStore().name || state.activeStore)}</strong><p>Prueba Limpiar caché y Sincronizar catálogo de esta misma tienda. Si el contador aparece con productos de otra tienda, abre /productos/debug?store=${encodeURIComponent(state.activeStore)}.</p></div>`; if ($('loadMoreInfo')) $('loadMoreInfo').textContent = `0/${state.productTotal || 0} productos`; $('loadMoreBtn').classList.add('hidden'); return; }
   state.productos = state.productos.slice().sort(sortProductsByStockThenName);
   $('productsList').innerHTML = state.productos.map(renderProductCard).join('');
   $('loadMoreInfo').textContent = `${state.productos.length}/${state.productTotal || state.productos.length} productos`;
@@ -750,14 +753,22 @@ async function loadProducts(force=false, append=false) {
     const data = await api(endpoint);
     if (expectedStore !== state.activeStore) { pushUiLog('warning','Catálogo descartado por cambio de tienda', `${expectedStore} → ${state.activeStore}`); return; }
     if (data.store && data.store !== state.activeStore) { notifyWarning('Catálogo descartado', `El servidor respondió ${data.store}, pero la tienda activa es ${state.activeStore}.`); return; }
-    let incoming = (data.productos || []).filter((p) => {
+    const rawProducts = data.productos || [];
+    let wrongStoreCount = 0;
+    let incoming = rawProducts.filter((p) => {
       const ps = normalizeStoreIdClient(p.store_id || p.store || data.store || state.activeStore);
       p.store_id = ps || state.activeStore;
+      if (ps && ps !== state.activeStore) wrongStoreCount += 1;
       return !ps || ps === state.activeStore;
     });
+    if (!incoming.length && rawProducts.length && wrongStoreCount === rawProducts.length && !force) {
+      pushUiLog('warning', 'Respuesta mezclada descartada', `Se recibieron ${wrongStoreCount} productos de otra tienda. Reintentando sin cache.`);
+      state.productLoading = false;
+      return loadProducts(true, append);
+    }
     incoming = incoming.sort(sortProductsByStockThenName);
     state.productos = append ? [...state.productos, ...incoming] : incoming;
-    state.productTotal = Number(data.total || state.productos.length);
+    state.productTotal = Number(incoming.length ? (data.total || state.productos.length) : 0);
     state.productOffset = state.productos.length;
     renderProducts();
     setLoadingState(data.cached ? 'Listo' : 'Actualizado', `${state.productos.length}/${state.productTotal} productos`);
