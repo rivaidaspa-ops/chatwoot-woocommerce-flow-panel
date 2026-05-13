@@ -1,4 +1,4 @@
-// v8.3.5 UI: selector profesional de pais con carga automatica.
+// v8.3.6 UI: selector de pais automatico, persistente y boton unico de mantenimiento.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -295,7 +295,7 @@ function renderStoreSelectors(updateDefaultDraft=false) {
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
   const st = currentStore();
-  if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Actual: ${st.country === 'CO' ? 'Colombia · COP · CC/NIT' : 'Chile · CLP · RUT'}. ${st.enabled === false ? 'Esta tienda falta por configurar en Credenciales.' : 'Productos, checkout y asistente se cargan automaticamente.'}`;
+  if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Actual: ${st.country === 'CO' ? 'Colombia · COP · CC/NIT' : 'Chile · CLP · RUT'}. ${st.enabled === false ? 'Esta tienda falta por configurar en Credenciales.' : 'Selección aplicada automáticamente: productos, checkout, pagos, envíos y asistente.'}`;
   // El país activo se cambia desde el frontend. No se refleja en Credenciales
   // para evitar que el formulario de Credenciales vuelva a forzar Chile/Colombia.
   if (updateDefaultDraft) {
@@ -325,15 +325,27 @@ function updateAssistantCountryUI() {
       : 'Asistente Chile independiente: RUT, comuna/región, CLP, Flow/Woo y despacho local.';
   }
 }
-async function changeStore(storeId, updateDefaultDraft=false) {
+async function changeStore(storeId, updateDefaultDraft=false, persistDefault=false) {
   const previousStore = state.activeStore;
   state.activeStore = normalizeStoreId(storeId || 'cl');
+  const targetStore = state.activeStore;
+  const requestId = Date.now() + ':' + Math.random().toString(16).slice(2);
+  state.lastStoreChangeRequest = requestId;
   localStorage.setItem('activeStore', state.activeStore);
+  if (persistDefault) {
+    localStorage.setItem('preferredStore', targetStore);
+    state.settings.DEFAULT_STORE = targetStore;
+    api('/admin/settings', { method:'POST', body: JSON.stringify({ settings: { DEFAULT_STORE: targetStore } }) }).catch((e) => console.warn('No se pudo guardar país operativo:', e.message));
+  }
   state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null; state.recommendations=null;
   renderStoreSelectors(updateDefaultDraft);
   if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Cargando ${state.activeStore === 'co' ? 'Colombia' : 'Chile'}...`;
   if ($('metricCache')) $('metricCache').textContent = 'Cargando';
   applyStoreUI(); renderCart(); renderOrders([]);
+  if (persistDefault) {
+    localStorage.removeItem(`regiones_${targetStore}_v83`);
+    await api('/cache/clear', { method:'POST', body:'{}' }).catch((e) => console.warn('No se pudo limpiar cache al cambiar país:', e.message));
+  }
   if (!isStoreEnabled(state.activeStore)) {
     const st = currentStore();
     notifyWarning('WooCommerce no configurado', `${st.name || st.id} no tiene credenciales. Puedes seguir usando otra tienda configurada.`);
@@ -344,6 +356,7 @@ async function changeStore(storeId, updateDefaultDraft=false) {
     return;
   }
   await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); await loadProducts(true);
+  if (state.lastStoreChangeRequest !== requestId) return;
   renderStoreSelectors(updateDefaultDraft);
   if ($('metricCache')) $('metricCache').textContent = 'Actualizado';
   if (previousStore !== state.activeStore) notifySuccess('País operativo actualizado', state.activeStore === 'co' ? 'Colombia cargada automáticamente.' : 'Chile cargado automáticamente.');
@@ -1257,18 +1270,26 @@ async function saveSettings() {
   }
   notifySuccess('Credenciales guardadas', 'Si cambiaste dominio o CORS, ejecuta Deploy/Restart en EasyPanel para limpiar proxy y caché.');
 }
-async function saveDefaultStoreFromFrontend() {
-  const store = normalizeStoreId($('frontStoreSelect')?.value || state.activeStore);
-  if ($('saveDefaultStoreBtn')) $('saveDefaultStoreBtn').disabled = true;
+async function refreshActiveCountry() {
+  const btn = $('refreshCountryBtn');
+  if (btn) btn.disabled = true;
   try {
-    await changeStore(store, true);
-    const data = await api('/admin/settings', { method:'POST', body: JSON.stringify({ settings: { DEFAULT_STORE: store } }) });
-    state.settings.DEFAULT_STORE = store;
-    renderStoreSelectors(false);
-    notifySuccess('País operativo fijado', store === 'co' ? 'Colombia queda como país principal y el panel ya quedó cargado.' : 'Chile queda como país principal y el panel ya quedó cargado.');
-    return data;
+    localStorage.removeItem(`regiones_${state.activeStore}_v83`);
+    await api('/cache/clear', { method:'POST', body:'{}' }).catch((e) => console.warn('No se pudo limpiar cache:', e.message));
+    state.productos = [];
+    state.productOffset = 0;
+    state.productTotal = 0;
+    state.categorias = [];
+    state.paymentMethods = [];
+    state.shippingMethods = [];
+    await loadRegiones(true);
+    await loadCategorias(true);
+    await loadPaymentMethods(true);
+    await loadShippingMethods(true);
+    await loadProducts(true);
+    notifySuccess('País actualizado', state.activeStore === 'co' ? 'Colombia recargada con caché limpio.' : 'Chile recargado con caché limpio.');
   } finally {
-    if ($('saveDefaultStoreBtn')) $('saveDefaultStoreBtn').disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 async function testSettings(target, store='') {
@@ -1331,10 +1352,10 @@ $('flowOrderDrawerBtn')?.addEventListener('click', flowSelectedOrder);
 $('searchOrdersBtn')?.addEventListener('click', searchOrders);
 $('clearOrderSearchBtn')?.addEventListener('click', clearOrderSearch);
 $('orderSearchInput')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter') searchOrders(); });
-$('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value, false).catch(e => notifyError(e.message)));
-$('frontStoreSelect')?.addEventListener('change', () => changeStore($('frontStoreSelect').value, false).catch(e => notifyError(e.message)));
-document.querySelectorAll('[data-front-store]').forEach(btn => btn.addEventListener('click', () => changeStore(btn.dataset.frontStore, false).catch(e => notifyError(e.message))));
-$('saveDefaultStoreBtn')?.addEventListener('click', () => saveDefaultStoreFromFrontend().catch(e => notifyError(e.message)));
+$('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value, false, true).catch(e => notifyError(e.message)));
+$('frontStoreSelect')?.addEventListener('change', () => changeStore($('frontStoreSelect').value, false, true).catch(e => notifyError(e.message)));
+document.querySelectorAll('[data-front-store]').forEach(btn => btn.addEventListener('click', () => changeStore(btn.dataset.frontStore, false, true).catch(e => notifyError(e.message))));
+$('refreshCountryBtn')?.addEventListener('click', () => refreshActiveCountry().catch(e => notifyError(e.message)));
 
 $('validateCouponBtn')?.addEventListener('click', () => validateCoupon().catch(e => notifyError(e.message)));
 $('clearCouponBtn')?.addEventListener('click', clearCoupon);
