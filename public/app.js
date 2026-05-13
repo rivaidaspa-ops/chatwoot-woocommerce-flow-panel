@@ -1,4 +1,4 @@
-// v8.3.6 UI: selector de pais automatico, persistente y boton unico de mantenimiento.
+// v8.3.7 UI: temas premium y contraste correcto por pais/tema.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -1287,7 +1287,7 @@ async function refreshActiveCountry() {
     await loadPaymentMethods(true);
     await loadShippingMethods(true);
     await loadProducts(true);
-    notifySuccess('País actualizado', state.activeStore === 'co' ? 'Colombia recargada con caché limpio.' : 'Chile recargado con caché limpio.');
+    notifySuccess('Datos del país actualizados', state.activeStore === 'co' ? 'Colombia recargada con caché limpio.' : 'Chile recargado con caché limpio.');
   } finally {
     if (btn) btn.disabled = false;
   }
