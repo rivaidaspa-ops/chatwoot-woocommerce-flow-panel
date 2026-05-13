@@ -1,4 +1,4 @@
-// v8.3.8: base estable v8.3 con Chatwoot context robusto y meta helpers.
+// v8.3.9: base estable v8.3 con scroll corregido en modal de variaciones.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -1519,5 +1519,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.3.8 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.3.9 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

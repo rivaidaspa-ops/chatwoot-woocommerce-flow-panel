@@ -1,4 +1,4 @@
-// v8.3.8 UI: Chatwoot context robusto, meta fixes y modal de variaciones premium.
+// v8.3.9 UI: Chatwoot context robusto, meta fixes y modal de variaciones con scroll interno.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
