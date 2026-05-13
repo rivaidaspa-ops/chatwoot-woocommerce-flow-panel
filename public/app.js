@@ -1,4 +1,4 @@
-// v8.3 UI: asistente por pais, prompts IA, cupon recomendado, pagos/envios Woo.
+// v8.3.3 UI: selector frontal de pais, stock bloqueado, asistente por pais.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -32,6 +32,11 @@ const state = {
   coupons: []
 };
 const $ = (id) => document.getElementById(id);
+function normalizeStoreId(value='') {
+  const v = String(value || '').trim().toLowerCase();
+  if (['co','colombia','cop','57'].includes(v)) return 'co';
+  return 'cl';
+}
 function currentStore(){ return state.stores.find(s => s.id === state.activeStore) || { id: state.activeStore, country: state.activeStore === 'co' ? 'CO' : 'CL', currency: state.activeStore === 'co' ? 'COP' : 'CLP', document_label: state.activeStore === 'co' ? 'CC / NIT' : 'RUT' }; }
 const money = (v) => `${Number(v || 0).toLocaleString(currentStore().country === 'CO' ? 'es-CO' : 'es-CL')} ${currentStore().currency || 'CLP'}`;
 const text = (v) => String(v ?? '').replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
@@ -270,13 +275,32 @@ async function loadStores() {
         notifyWarning('Tienda sin credenciales', `Se abrió ${currentStore().name || state.activeStore} porque la tienda anterior no tiene WooCommerce configurado.`);
       }
     }
-    const sel = $('storeSelect');
-    if (sel) {
-      sel.innerHTML = state.stores.map(s => `<option value="${text(s.id)}">${text(s.name || s.id)} · ${text(s.country || s.code || '')}${s.enabled ? '' : ' · falta configurar'}</option>`).join('');
-      sel.value = state.activeStore;
-    }
+    renderStoreSelectors(false);
     applyStoreUI();
   } catch (e) { console.warn('No se pudieron cargar tiendas:', e.message); }
+}
+function renderStoreSelectors(updateDefaultDraft=false) {
+  const options = state.stores.length
+    ? state.stores.map(s => `<option value="${text(s.id)}">${text(s.name || s.id)} · ${text(s.country || s.code || '')}${s.enabled ? '' : ' · falta configurar'}</option>`).join('')
+    : '<option value="cl">Chile · CL</option><option value="co">Colombia · CO</option>';
+  ['storeSelect','frontStoreSelect'].forEach((id) => {
+    const sel = $(id);
+    if (!sel) return;
+    sel.innerHTML = options;
+    sel.value = state.activeStore;
+  });
+  document.querySelectorAll('[data-front-store]').forEach((btn) => {
+    const active = btn.dataset.frontStore === state.activeStore;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  const st = currentStore();
+  if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Actual: ${st.country === 'CO' ? 'Colombia · COP · CC/NIT' : 'Chile · CLP · RUT'}. ${st.enabled === false ? 'Esta tienda falta por configurar en Credenciales.' : 'Selector activo para productos, checkout y asistente.'}`;
+  if (updateDefaultDraft) {
+    const defaultStoreInput = document.querySelector('[data-setting="DEFAULT_STORE"]');
+    if (defaultStoreInput) defaultStoreInput.value = state.activeStore;
+    state.settings.DEFAULT_STORE = state.activeStore;
+  }
 }
 function applyStoreUI() {
   const st = currentStore();
@@ -287,6 +311,7 @@ function applyStoreUI() {
   if ($('billingRut')) $('billingRut').placeholder = st.country === 'CO' ? 'Documento: CC / NIT' : 'RUT: 12.345.678-9';
   if ($('docHelp')) $('docHelp').innerHTML = st.country === 'CO' ? 'Documento compatible con WooCommerce/Dropi. El departamento se envia como codigo Dropi.' : 'El RUT se guarda en campos esenciales: billing_rut y shipping_rut.';
   if ($('billingPhone')) $('billingPhone').placeholder = st.country === 'CO' ? 'Telefono +57' : 'Telefono +56';
+  renderStoreSelectors(false);
   updateAssistantCountryUI();
 }
 function updateAssistantCountryUI() {
@@ -300,9 +325,11 @@ function updateAssistantCountryUI() {
       : 'Asistente Chile independiente: RUT, comuna/región, CLP, Flow/Woo y despacho local.';
   }
 }
-async function changeStore(storeId) {
-  state.activeStore = storeId || 'cl'; localStorage.setItem('activeStore', state.activeStore);
+async function changeStore(storeId, updateDefaultDraft=false) {
+  state.activeStore = normalizeStoreId(storeId || 'cl');
+  localStorage.setItem('activeStore', state.activeStore);
   state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null; state.recommendations=null;
+  renderStoreSelectors(updateDefaultDraft);
   applyStoreUI(); renderCart(); renderOrders([]);
   if (!isStoreEnabled(state.activeStore)) {
     const st = currentStore();
@@ -709,7 +736,7 @@ async function loadProducts(force=false, append=false) {
     if (fallback && fallback !== state.activeStore) {
       notifyWarning('Tienda sin credenciales', `Cambiando a ${state.stores.find(s=>s.id===fallback)?.name || fallback}.`);
       state.activeStore = fallback; localStorage.setItem('activeStore', fallback);
-      const sel = $('storeSelect'); if (sel) sel.value = fallback;
+      renderStoreSelectors(false);
       applyStoreUI();
     } else {
       $('productsList').innerHTML = `<div class="empty-state"><strong>No hay WooCommerce configurado para esta tienda</strong><p>${text(configuredStoreNotice())}</p><button class="btn btn-sm btn-primary" id="openSettingsFromProducts">Abrir credenciales</button></div>`;
@@ -1203,6 +1230,7 @@ async function loadSettings() {
   const data = await api('/admin/settings');
   state.settings = data.settings || {};
   fillSettingsForm(state.settings);
+  renderStoreSelectors(false);
   if (state.chatwootContext) maybeAutoSwitchStoreFromContext(state.chatwootContext, 'configuración');
   if ($('settingsStatus')) $('settingsStatus').textContent = data.postgres ? 'Configuración guardada correctamente.' : 'Configuración temporal: revisa la conexión de base de datos.';
 }
@@ -1221,6 +1249,16 @@ async function saveSettings() {
     await loadProducts(true);
   }
   notifySuccess('Credenciales guardadas', 'Si cambiaste dominio o CORS, ejecuta Deploy/Restart en EasyPanel para limpiar proxy y caché.');
+}
+async function saveDefaultStoreFromFrontend() {
+  const store = normalizeStoreId(state.activeStore);
+  const data = await api('/admin/settings', { method:'POST', body: JSON.stringify({ settings: { DEFAULT_STORE: store } }) });
+  state.settings.DEFAULT_STORE = store;
+  const defaultStoreInput = document.querySelector('[data-setting="DEFAULT_STORE"]');
+  if (defaultStoreInput) defaultStoreInput.value = store;
+  renderStoreSelectors(true);
+  notifySuccess('País predeterminado guardado', store === 'co' ? 'Colombia quedará como inicio por defecto.' : 'Chile quedará como inicio por defecto.');
+  return data;
 }
 async function testSettings(target, store='') {
   try {
@@ -1282,7 +1320,10 @@ $('flowOrderDrawerBtn')?.addEventListener('click', flowSelectedOrder);
 $('searchOrdersBtn')?.addEventListener('click', searchOrders);
 $('clearOrderSearchBtn')?.addEventListener('click', clearOrderSearch);
 $('orderSearchInput')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter') searchOrders(); });
-$('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value).catch(e => notifyError(e.message)));
+$('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value, true).catch(e => notifyError(e.message)));
+$('frontStoreSelect')?.addEventListener('change', () => changeStore($('frontStoreSelect').value, true).catch(e => notifyError(e.message)));
+document.querySelectorAll('[data-front-store]').forEach(btn => btn.addEventListener('click', () => changeStore(btn.dataset.frontStore, true).catch(e => notifyError(e.message))));
+$('saveDefaultStoreBtn')?.addEventListener('click', () => saveDefaultStoreFromFrontend().catch(e => notifyError(e.message)));
 
 $('validateCouponBtn')?.addEventListener('click', () => validateCoupon().catch(e => notifyError(e.message)));
 $('clearCouponBtn')?.addEventListener('click', clearCoupon);
