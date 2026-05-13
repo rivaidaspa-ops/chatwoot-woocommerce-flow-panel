@@ -1,4 +1,4 @@
-// v8.3.3 UI: selector frontal de pais, stock bloqueado, asistente por pais.
+// v8.3.4 UI: selector frontal de pais sin tienda por defecto en Credenciales.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -296,10 +296,10 @@ function renderStoreSelectors(updateDefaultDraft=false) {
   });
   const st = currentStore();
   if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Actual: ${st.country === 'CO' ? 'Colombia · COP · CC/NIT' : 'Chile · CLP · RUT'}. ${st.enabled === false ? 'Esta tienda falta por configurar en Credenciales.' : 'Selector activo para productos, checkout y asistente.'}`;
+  // El país activo se cambia desde el frontend. No se refleja en Credenciales
+  // para evitar que el formulario de Credenciales vuelva a forzar Chile/Colombia.
   if (updateDefaultDraft) {
-    const defaultStoreInput = document.querySelector('[data-setting="DEFAULT_STORE"]');
-    if (defaultStoreInput) defaultStoreInput.value = state.activeStore;
-    state.settings.DEFAULT_STORE = state.activeStore;
+    state.settings.ACTIVE_STORE_UI = state.activeStore;
   }
 }
 function applyStoreUI() {
@@ -1254,9 +1254,7 @@ async function saveDefaultStoreFromFrontend() {
   const store = normalizeStoreId(state.activeStore);
   const data = await api('/admin/settings', { method:'POST', body: JSON.stringify({ settings: { DEFAULT_STORE: store } }) });
   state.settings.DEFAULT_STORE = store;
-  const defaultStoreInput = document.querySelector('[data-setting="DEFAULT_STORE"]');
-  if (defaultStoreInput) defaultStoreInput.value = store;
-  renderStoreSelectors(true);
+  renderStoreSelectors(false);
   notifySuccess('País predeterminado guardado', store === 'co' ? 'Colombia quedará como inicio por defecto.' : 'Chile quedará como inicio por defecto.');
   return data;
 }
@@ -1320,9 +1318,9 @@ $('flowOrderDrawerBtn')?.addEventListener('click', flowSelectedOrder);
 $('searchOrdersBtn')?.addEventListener('click', searchOrders);
 $('clearOrderSearchBtn')?.addEventListener('click', clearOrderSearch);
 $('orderSearchInput')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter') searchOrders(); });
-$('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value, true).catch(e => notifyError(e.message)));
-$('frontStoreSelect')?.addEventListener('change', () => changeStore($('frontStoreSelect').value, true).catch(e => notifyError(e.message)));
-document.querySelectorAll('[data-front-store]').forEach(btn => btn.addEventListener('click', () => changeStore(btn.dataset.frontStore, true).catch(e => notifyError(e.message))));
+$('storeSelect')?.addEventListener('change', () => changeStore($('storeSelect').value, false).catch(e => notifyError(e.message)));
+$('frontStoreSelect')?.addEventListener('change', () => changeStore($('frontStoreSelect').value, false).catch(e => notifyError(e.message)));
+document.querySelectorAll('[data-front-store]').forEach(btn => btn.addEventListener('click', () => changeStore(btn.dataset.frontStore, false).catch(e => notifyError(e.message))));
 $('saveDefaultStoreBtn')?.addEventListener('click', () => saveDefaultStoreFromFrontend().catch(e => notifyError(e.message)));
 
 $('validateCouponBtn')?.addEventListener('click', () => validateCoupon().catch(e => notifyError(e.message)));

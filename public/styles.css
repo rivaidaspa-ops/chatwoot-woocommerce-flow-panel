@@ -147,6 +147,6 @@ body.modal-open{overflow:hidden}
 #couponAiHint{margin-top:6px;color:#456078}
 .settings-group textarea::placeholder{color:#8896aa}
 
-/* v8.3.3 selector frontal de pais */
+/* v8.3.4 selector frontal de pais */
 .country-switch-card{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(300px,.8fr);gap:18px;align-items:center;background:linear-gradient(180deg,var(--card),color-mix(in srgb,var(--soft) 45%,#fff));}
 .country-switch-card h2{margin:0 0 8px;font-size:22px}.country-switch-card p{margin:0}.country-switch-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end}.country-switch-actions label{grid-column:1/-1}.country-switch-actions #saveDefaultStoreBtn{grid-column:1/-1}.country-btn{background:var(--card);color:var(--primary);border:1px solid var(--border);box-shadow:none}.country-btn.active{background:var(--primary);color:#fff;border-color:var(--primary);box-shadow:0 10px 22px rgba(15,118,110,.18)}#frontStoreHelp{display:block;margin-top:10px;font-weight:800}:root[data-theme="dark"] .country-switch-card{background:#0f172a}:root[data-theme="dark"] .country-btn{background:#111827;color:#e5e7eb}@media(max-width:860px){.country-switch-card{grid-template-columns:1fr}.country-switch-actions{grid-template-columns:1fr}.country-switch-actions button,.country-switch-actions select{width:100%}}
