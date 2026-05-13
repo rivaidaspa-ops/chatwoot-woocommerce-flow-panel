@@ -1,4 +1,4 @@
-// v8.3.9 UI: Chatwoot context robusto, meta fixes y modal de variaciones con scroll interno.
+// v8.4.0 UI: Vendix Hub, nombres comerciales por país y modal de variaciones con scroll interno.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -282,7 +282,7 @@ function isStoreEnabled(storeId = state.activeStore) {
 }
 function configuredStoreNotice() {
   const enabled = state.stores.filter(s => s.enabled).map(s => s.name || s.id).join(', ');
-  return enabled ? `Tiendas configuradas: ${enabled}` : 'No hay tiendas con WooCommerce configurado. Abre Credenciales y completa al menos Chile o Colombia.';
+  return enabled ? `Tiendas configuradas: ${enabled}` : 'No hay tiendas con WooCommerce configurado. Abre Credenciales y completa al menos una tienda operativa.';
 }
 async function loadStores() {
   try {
@@ -312,12 +312,21 @@ function renderStoreSelectors(updateDefaultDraft=false) {
     sel.value = state.activeStore;
   });
   document.querySelectorAll('[data-front-store]').forEach((btn) => {
-    const active = btn.dataset.frontStore === state.activeStore;
+    const storeId = normalizeStoreId(btn.dataset.frontStore || '');
+    const store = state.stores.find((s) => normalizeStoreId(s.id) === storeId) || { id: storeId, country: storeId === 'co' ? 'CO' : 'CL', currency: storeId === 'co' ? 'COP' : 'CLP', name: storeId === 'co' ? 'Colombia' : 'Chile' };
+    const countryName = store.country === 'CO' ? 'Colombia' : 'Chile';
+    const docName = store.country === 'CO' ? 'CC/NIT' : 'RUT';
+    const active = storeId === state.activeStore;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    const title = btn.querySelector('span');
+    const subtitle = btn.querySelector('small');
+    if (title) title.textContent = store.name || countryName;
+    if (subtitle) subtitle.textContent = `${countryName} · ${store.currency || (store.country === 'CO' ? 'COP' : 'CLP')} · ${docName}`;
   });
   const st = currentStore();
-  if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Actual: ${st.country === 'CO' ? 'Colombia · COP · CC/NIT' : 'Chile · CLP · RUT'}. ${st.enabled === false ? 'Esta tienda falta por configurar en Credenciales.' : 'Selección aplicada automáticamente: productos, checkout, pagos, envíos y asistente.'}`;
+  const countryLabel = st.country === 'CO' ? 'Colombia · COP · CC/NIT' : 'Chile · CLP · RUT';
+  if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Actual: ${st.name || countryLabel} · ${countryLabel}. ${st.enabled === false ? 'Esta tienda falta por configurar en Credenciales.' : 'Selección aplicada automáticamente: productos, checkout, pagos, envíos y asistente.'}`;
   // El país activo se cambia desde el frontend. No se refleja en Credenciales
   // para evitar que el formulario de Credenciales vuelva a forzar Chile/Colombia.
   if (updateDefaultDraft) {

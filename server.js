@@ -1,4 +1,4 @@
-// v8.3.9: base estable v8.3 con scroll corregido en modal de variaciones.
+// v8.4.0: Vendix Hub con nombres comerciales por país configurables desde Credenciales.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -220,7 +220,7 @@ async function remember(key, ttlSeconds, factory, force = false) {
   return { value, cached: false };
 }
 function publicHealth(req, res) {
-  res.json({ ok: true, service: 'chatwoot-woocommerce-flow-panel-v8.3.7-premium-theme-contrast-ui', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
+  res.json({ ok: true, service: 'vendix-hub-v8.4.0-store-names', port: PORT, redis: redisReady, postgres: dbReady, cache_items: memoryCache.size, sync: syncJob.running ? 'running' : 'idle' });
 }
 app.get('/health', publicHealth);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -374,7 +374,7 @@ function regionStateValue(info, store = null) {
 
 const CONFIG_KEYS = [
   'PUBLIC_BASE_URL','ALLOWED_ORIGINS','PANEL_APP_TOKEN','DEFAULT_STORE',
-  'WC_URL','WC_KEY','WC_SECRET','WOO_FLOW_GATEWAY_ID','WOO_FLOW_GATEWAY_TITLE',
+  'CL_STORE_NAME','WC_URL','WC_KEY','WC_SECRET','WOO_FLOW_GATEWAY_ID','WOO_FLOW_GATEWAY_TITLE',
   'CO_WC_URL','CO_WC_KEY','CO_WC_SECRET','CO_STORE_NAME','CO_WOO_PAYMENT_GATEWAY_ID','CO_WOO_PAYMENT_GATEWAY_TITLE',
   'CO_COD_GATEWAY_ID','CO_COD_GATEWAY_TITLE','CO_WOMPI_GATEWAY_ID','CO_WOMPI_GATEWAY_TITLE','CO_BOLD_GATEWAY_ID','CO_BOLD_GATEWAY_TITLE','CO_PSE_GATEWAY_ID','CO_PSE_GATEWAY_TITLE','CO_MERCADO_PAGO_GATEWAY_ID','CO_MERCADO_PAGO_GATEWAY_TITLE','CO_EPAYCO_GATEWAY_ID','CO_EPAYCO_GATEWAY_TITLE','CO_PAYU_GATEWAY_ID','CO_PAYU_GATEWAY_TITLE','CO_BANK_TRANSFER_GATEWAY_ID','CO_BANK_TRANSFER_GATEWAY_TITLE','CO_PAYMENT_METHOD_PRESETS_JSON','CL_DEFAULT_SHIPPING_METHOD_ID','CL_DEFAULT_SHIPPING_METHOD_TITLE','CO_DEFAULT_SHIPPING_METHOD_ID','CO_DEFAULT_SHIPPING_METHOD_TITLE',
   'CHATWOOT_URL','CHATWOOT_API_KEY','CHATWOOT_ACCOUNT_ID',
@@ -1004,7 +1004,7 @@ app.post('/cupones', async (req, res, next) => {
       code,
       discount_type: body.discount_type || 'fixed_cart',
       amount: String(body.amount || '0'),
-      description: body.description || `Cupon creado desde panel Rivaida ${st.name}`,
+      description: body.description || `Cupón creado desde Vendix Hub ${st.name}`,
       free_shipping: Boolean(body.free_shipping),
       individual_use: body.individual_use !== false,
       usage_limit: body.usage_limit ? Number(body.usage_limit) : undefined,
@@ -1356,12 +1356,12 @@ const DEFAULT_CHATWOOT_LABELS = [
   { title:'rivaida_postventa', description:'Consulta postventa o seguimiento', color:'#8b5cf6' }
 ];
 const DEFAULT_CHATWOOT_ATTRIBUTES = [
-  { attribute_display_name:'Rivaida estado', attribute_key:'rivaida_estado', attribute_description:'Estado comercial desde panel Rivaida', attribute_display_type:0, attribute_model:0 },
-  { attribute_display_name:'Rivaida email detectado', attribute_key:'rivaida_email_detectado', attribute_description:'Email tomado del contacto o detectado en la conversacion', attribute_display_type:0, attribute_model:0 },
-  { attribute_display_name:'Rivaida ultimo producto', attribute_key:'rivaida_ultimo_producto', attribute_description:'Ultimo producto enviado al chat', attribute_display_type:0, attribute_model:0 },
-  { attribute_display_name:'Rivaida ultimo SKU', attribute_key:'rivaida_ultimo_sku', attribute_description:'SKU del ultimo producto enviado', attribute_display_type:0, attribute_model:0 },
-  { attribute_display_name:'Rivaida carrito total', attribute_key:'rivaida_carrito_total', attribute_description:'Total estimado del carrito', attribute_display_type:1, attribute_model:0 },
-  { attribute_display_name:'Rivaida rut validado', attribute_key:'rivaida_rut_validado', attribute_description:'RUT validado desde el panel', attribute_display_type:7, attribute_model:0 }
+  { attribute_display_name:'Vendix estado', attribute_key:'rivaida_estado', attribute_description:'Estado comercial desde Vendix Hub', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Vendix email detectado', attribute_key:'rivaida_email_detectado', attribute_description:'Email tomado del contacto o detectado en la conversacion', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Vendix ultimo producto', attribute_key:'rivaida_ultimo_producto', attribute_description:'Ultimo producto enviado al chat', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Vendix ultimo SKU', attribute_key:'rivaida_ultimo_sku', attribute_description:'SKU del ultimo producto enviado', attribute_display_type:0, attribute_model:0 },
+  { attribute_display_name:'Vendix carrito total', attribute_key:'rivaida_carrito_total', attribute_description:'Total estimado del carrito', attribute_display_type:1, attribute_model:0 },
+  { attribute_display_name:'Vendix rut validado', attribute_key:'rivaida_rut_validado', attribute_description:'RUT validado desde el panel', attribute_display_type:7, attribute_model:0 }
 ];
 
 async function sendChatwootProductMessage(client, conversationId, content, img, privateNote, contentAttributes) {
@@ -1519,5 +1519,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.3.9 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Vendix Hub v8.4.0 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });

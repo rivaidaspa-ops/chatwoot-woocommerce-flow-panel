@@ -1,7 +1,7 @@
 {
-  "name": "chatwoot-woocommerce-flow-panel",
-  "version": "8.3.9",
-  "description": "Panel Chatwoot WooCommerce multi-pais v8.3.9 modal scroll fix",
+  "name": "vendix-hub",
+  "version": "8.4.0",
+  "description": "Vendix Hub v8.4.0 panel comercial multi-pais con nombres de tienda por pais",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
