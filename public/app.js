@@ -1,4 +1,4 @@
-// v8.3.4 UI: selector frontal de pais sin tienda por defecto en Credenciales.
+// v8.3.5 UI: selector profesional de pais con carga automatica.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -295,7 +295,7 @@ function renderStoreSelectors(updateDefaultDraft=false) {
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
   const st = currentStore();
-  if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Actual: ${st.country === 'CO' ? 'Colombia · COP · CC/NIT' : 'Chile · CLP · RUT'}. ${st.enabled === false ? 'Esta tienda falta por configurar en Credenciales.' : 'Selector activo para productos, checkout y asistente.'}`;
+  if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Actual: ${st.country === 'CO' ? 'Colombia · COP · CC/NIT' : 'Chile · CLP · RUT'}. ${st.enabled === false ? 'Esta tienda falta por configurar en Credenciales.' : 'Productos, checkout y asistente se cargan automaticamente.'}`;
   // El país activo se cambia desde el frontend. No se refleja en Credenciales
   // para evitar que el formulario de Credenciales vuelva a forzar Chile/Colombia.
   if (updateDefaultDraft) {
@@ -326,10 +326,13 @@ function updateAssistantCountryUI() {
   }
 }
 async function changeStore(storeId, updateDefaultDraft=false) {
+  const previousStore = state.activeStore;
   state.activeStore = normalizeStoreId(storeId || 'cl');
   localStorage.setItem('activeStore', state.activeStore);
   state.productos=[]; state.productOffset=0; state.productTotal=0; state.categorias=[]; state.paymentMethods=[]; state.pedidos=[]; state.cart=[]; state.lastOrder=null; state.recommendations=null;
   renderStoreSelectors(updateDefaultDraft);
+  if ($('frontStoreHelp')) $('frontStoreHelp').textContent = `Cargando ${state.activeStore === 'co' ? 'Colombia' : 'Chile'}...`;
+  if ($('metricCache')) $('metricCache').textContent = 'Cargando';
   applyStoreUI(); renderCart(); renderOrders([]);
   if (!isStoreEnabled(state.activeStore)) {
     const st = currentStore();
@@ -341,7 +344,11 @@ async function changeStore(storeId, updateDefaultDraft=false) {
     return;
   }
   await loadRegiones(true); await loadCategorias(true); await loadPaymentMethods(true); await loadShippingMethods(true); await loadProducts(true);
+  renderStoreSelectors(updateDefaultDraft);
+  if ($('metricCache')) $('metricCache').textContent = 'Actualizado';
+  if (previousStore !== state.activeStore) notifySuccess('País operativo actualizado', state.activeStore === 'co' ? 'Colombia cargada automáticamente.' : 'Chile cargado automáticamente.');
 }
+
 async function loadRegiones(force=false) {
   const key = `regiones_${state.activeStore}_v83`;
   const cached = !force && readLocal(key, 86400000 * 30);
@@ -1251,12 +1258,18 @@ async function saveSettings() {
   notifySuccess('Credenciales guardadas', 'Si cambiaste dominio o CORS, ejecuta Deploy/Restart en EasyPanel para limpiar proxy y caché.');
 }
 async function saveDefaultStoreFromFrontend() {
-  const store = normalizeStoreId(state.activeStore);
-  const data = await api('/admin/settings', { method:'POST', body: JSON.stringify({ settings: { DEFAULT_STORE: store } }) });
-  state.settings.DEFAULT_STORE = store;
-  renderStoreSelectors(false);
-  notifySuccess('País predeterminado guardado', store === 'co' ? 'Colombia quedará como inicio por defecto.' : 'Chile quedará como inicio por defecto.');
-  return data;
+  const store = normalizeStoreId($('frontStoreSelect')?.value || state.activeStore);
+  if ($('saveDefaultStoreBtn')) $('saveDefaultStoreBtn').disabled = true;
+  try {
+    await changeStore(store, true);
+    const data = await api('/admin/settings', { method:'POST', body: JSON.stringify({ settings: { DEFAULT_STORE: store } }) });
+    state.settings.DEFAULT_STORE = store;
+    renderStoreSelectors(false);
+    notifySuccess('País operativo fijado', store === 'co' ? 'Colombia queda como país principal y el panel ya quedó cargado.' : 'Chile queda como país principal y el panel ya quedó cargado.');
+    return data;
+  } finally {
+    if ($('saveDefaultStoreBtn')) $('saveDefaultStoreBtn').disabled = false;
+  }
 }
 async function testSettings(target, store='') {
   try {
