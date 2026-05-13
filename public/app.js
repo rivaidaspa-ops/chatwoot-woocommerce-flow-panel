@@ -1,4 +1,4 @@
-// v8.3.7 UI: temas premium y contraste correcto por pais/tema.
+// v8.3.8 UI: Chatwoot context robusto, meta fixes y modal de variaciones premium.
 const state = {
   auth: localStorage.getItem('panelAuth') || '',
   panelToken: localStorage.getItem('panelToken') || '',
@@ -66,25 +66,43 @@ function parseMaybeJson(data) {
   if (typeof data === 'string') { try { return JSON.parse(data); } catch { return null; } }
   return typeof data === 'object' ? data : null;
 }
+function isTemplatePlaceholder(value='') {
+  const raw = String(value || '').trim();
+  return !raw || /\{\{|\}\}|\$\{|<%|%>|^undefined$|^null$/i.test(raw);
+}
+function isValidEmail(value='') {
+  const raw = String(value || '').trim().toLowerCase();
+  return !isTemplatePlaceholder(raw) && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(raw);
+}
+function cleanEmail(value='') {
+  const raw = String(value || '').trim().toLowerCase();
+  return isValidEmail(raw) ? raw : '';
+}
+function cleanChatwootId(value='') {
+  const raw = String(value || '').trim();
+  return isTemplatePlaceholder(raw) ? '' : raw;
+}
 function extractEmailFromString(value='') {
+  if (isTemplatePlaceholder(value)) return '';
   const match = String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return match ? match[0].toLowerCase() : '';
+  return match ? cleanEmail(match[0]) : '';
 }
 function extractChatwootContext(payload = {}) {
-  const appContext = payload.event === 'appContext' ? payload.data : (payload.appContext || payload.data || payload);
-  const conversation = appContext.conversation || appContext.currentConversation || appContext;
-  const contact = appContext.contact || conversation.contact || conversation.meta?.sender || conversation.sender || appContext.meta?.sender || {};
+  const appContext = payload.event === 'appContext' ? payload.data : (payload.appContext || payload.data?.appContext || payload.data || payload);
+  const conversation = appContext.conversation || appContext.currentConversation || appContext.current_conversation || appContext;
+  const sender = conversation.meta?.sender || appContext.meta?.sender || {};
+  const contact = appContext.contact || conversation.contact || sender || conversation.sender || {};
   const inboxId = conversation.inbox_id || conversation.inbox?.id || appContext.inbox_id || appContext.inbox?.id || conversation.meta?.inbox_id || conversation.meta?.inbox?.id || conversation.additional_attributes?.inbox_id || '';
-  const conversationId = conversation.id || conversation.conversation_id || appContext.conversation_id || appContext.id || '';
-  let email = contact.email || conversation.meta?.sender?.email || conversation.contact_email || appContext.email || '';
+  const conversationId = cleanChatwootId(conversation.id || conversation.conversation_id || appContext.conversation_id || appContext.id || '');
+  let email = cleanEmail(contact.email || sender.email || conversation.contact_email || appContext.email || '');
   if (!email) {
     for (const msg of conversation.messages || []) {
-      email = msg.sender?.email || extractEmailFromString(msg.content || msg.processed_message_content || '');
+      email = cleanEmail(msg.sender?.email || msg.sender?.identifier || '') || extractEmailFromString(msg.content || msg.processed_message_content || '');
       if (email) break;
     }
   }
-  const name = contact.name || contact.available_name || conversation.meta?.sender?.name || '';
-  const phone = contact.phone_number || contact.phone || conversation.meta?.sender?.phone_number || appContext.phone || '';
+  const name = contact.name || contact.available_name || sender.name || '';
+  const phone = contact.phone_number || contact.phone || sender.phone_number || appContext.phone || '';
   const labels = conversation.labels || conversation.label_list || [];
   const customAttributes = conversation.custom_attributes || contact.custom_attributes || {};
   return { raw: payload, appContext, conversation, contact, conversationId, inboxId, email, name, phone, labels, customAttributes };
@@ -131,8 +149,10 @@ function maybeAutoSwitchStoreFromContext(ctx = {}, source='Chatwoot') {
 }
 function renderChatwootContext(ctx, source='Chatwoot') {
   state.chatwootContext = ctx;
-  if (ctx?.conversationId && $('conversationId')) $('conversationId').value = ctx.conversationId;
-  if (ctx?.email && $('customerEmail')) $('customerEmail').value = ctx.email;
+  const safeConversationId = cleanChatwootId(ctx?.conversationId || '');
+  const safeEmail = cleanEmail(ctx?.email || '');
+  if (safeConversationId && $('conversationId')) $('conversationId').value = safeConversationId;
+  if (safeEmail && $('customerEmail')) $('customerEmail').value = safeEmail;
   if (ctx?.phone && $('billingPhone') && !$('billingPhone').value) $('billingPhone').value = ctx.phone;
   if (ctx?.name && $('billingFirstName') && !$('billingFirstName').value) {
     const parts = String(ctx.name).trim().split(/\s+/);
@@ -141,18 +161,18 @@ function renderChatwootContext(ctx, source='Chatwoot') {
   }
   maybeAutoSwitchStoreFromContext(ctx, source);
   const status = $('chatwootContextStatus');
-  if (status) status.textContent = ctx?.conversationId ? `Conectado a conversación #${ctx.conversationId}` : 'Contexto recibido sin ID de conversación';
+  if (status) status.textContent = safeConversationId ? `Conectado a conversación #${safeConversationId}` : 'Contexto recibido sin ID de conversación';
   const box = $('chatwootContextBox');
   if (box) {
     box.className = 'chatwoot-context-box active';
-    box.innerHTML = `<strong>${text(ctx?.name || 'Contacto Chatwoot')}</strong><span>Email: ${text(ctx?.email || 'pendiente / no detectado')}</span><span>Conversación: ${text(ctx?.conversationId || 'N/D')}</span><span>Teléfono: ${text(ctx?.phone || 'N/D')}</span><span>Inbox: ${text(ctx?.inboxId || 'N/D')}</span><span>Tienda sugerida: ${text(inferStoreFromChatwootContext(ctx) || state.activeStore)}</span><span>Origen: ${text(source)}</span>${ctx?.labels?.length ? `<span>Etiquetas: ${ctx.labels.map(text).join(', ')}</span>` : ''}`;
+    box.innerHTML = `<strong>${text(ctx?.name || 'Contacto Chatwoot')}</strong><span>Email: ${text(safeEmail || 'pendiente / no detectado')}</span><span>Conversación: ${text(safeConversationId || 'N/D')}</span><span>Teléfono: ${text(ctx?.phone || 'N/D')}</span><span>Inbox: ${text(ctx?.inboxId || 'N/D')}</span><span>Tienda sugerida: ${text(inferStoreFromChatwootContext(ctx) || state.activeStore)}</span><span>Origen: ${text(source)}</span>${ctx?.labels?.length ? `<span>Etiquetas: ${ctx.labels.map(text).join(', ')}</span>` : ''}`;
   }
 }
 async function enrichContextFromServer(conversationId='') {
   const id = conversationId || $('conversationId')?.value?.trim();
   if (!id) return null;
   const data = await api(`/chatwoot/conversacion/${encodeURIComponent(id)}/contexto`);
-  const ctx = { conversationId: data.conversationId || id, inboxId: data.inbox_id || data.conversation?.inbox_id || data.conversation?.inbox?.id || '', email: data.email || '', name: data.name || '', phone: data.phone || '', labels: data.labels || [], customAttributes: data.custom_attributes || {}, conversation: data.conversation, contact: data.contact };
+  const ctx = { conversationId: cleanChatwootId(data.conversationId || id), inboxId: data.inbox_id || data.conversation?.inbox_id || data.conversation?.inbox?.id || '', email: cleanEmail(data.email || ''), name: data.name || '', phone: data.phone || '', labels: data.labels || [], customAttributes: data.custom_attributes || {}, conversation: data.conversation, contact: data.contact };
   renderChatwootContext(ctx, data.email_detected_from_message ? 'Chatwoot + email detectado en mensajes' : 'Chatwoot API');
   if (ctx.email && !state.cliente) loadPanel(false).catch(console.warn);
   return ctx;
@@ -187,8 +207,10 @@ function readUrlParams() {
   const p = new URLSearchParams(location.search);
   const token = p.get('panel_token') || p.get('token') || '';
   if (token) { state.panelToken = token; localStorage.setItem('panelToken', token); }
-  const email = p.get('email') || p.get('email_cliente') || p.get('customer_email') || p.get('contact_email') || '';
-  const conversationId = p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '';
+  const rawEmail = p.get('email') || p.get('email_cliente') || p.get('customer_email') || p.get('contact_email') || '';
+  const rawConversationId = p.get('conversation_id') || p.get('conversationId') || p.get('conversation.id') || p.get('cw_conversation_id') || '';
+  const email = cleanEmail(rawEmail);
+  const conversationId = cleanChatwootId(rawConversationId);
   if (email && $('customerEmail')) $('customerEmail').value = email;
   if (conversationId && $('conversationId')) $('conversationId').value = conversationId;
   if (email || conversationId) renderChatwootContext({ email, conversationId, name: '', phone: '', labels: [], customAttributes: {} }, 'URL');
@@ -242,7 +264,7 @@ async function enterApp() {
   readUrlParams();
   installChatwootContextListener();
   autoRequestChatwootContext();
-  const email = $('customerEmail').value.trim();
+  const email = cleanEmail($('customerEmail').value.trim());
   if (email) loadPanel(false); else loadProducts(false);
 }
 async function testAuth() {
@@ -632,7 +654,7 @@ function renderVariationModal() {
     const ok = isStockValueOk(v);
     const active = current && String(current.id) === String(v.id);
     const img = v.imagen || product.imagen || product.imagenes?.[0]?.src || '';
-    return `<button type="button" class="var-card ${active ? 'active' : ''} ${ok ? '' : 'disabled'}" data-select-var="${product.id}" data-var-id="${v.id}" ${ok ? '' : 'disabled'}>${img ? `<img src="${text(img)}" alt="" loading="lazy"/>` : '<span class="var-no-img">Sin img</span>'}<span>${text(variationLabel(v))}</span><strong>${money(v.precio)}</strong><small>${text(v.sku || 'Sin SKU')} · ${ok ? 'con stock' : 'sin stock'}</small></button>`;
+    return `<button type="button" class="var-card ${active ? 'active' : ''} ${ok ? '' : 'disabled'}" data-select-var="${product.id}" data-var-id="${v.id}" ${ok ? '' : 'disabled'}><span class="var-card-media">${img ? `<img src="${text(img)}" alt="" loading="lazy"/>` : '<span class="var-no-img">Sin img</span>'}</span><span class="var-card-title">${text(variationLabel(v))}</span><strong class="var-card-price">${money(v.precio)}</strong><small class="var-card-meta">${text(v.sku || 'Sin SKU')} · ${ok ? 'con stock' : 'sin stock'}</small></button>`;
   }).join('');
   const currentOk = current && isStockValueOk(current);
   body.innerHTML = `<div class="variation-modal-grid"><div>${selectors || '<p class="muted">Sin atributos visibles.</p>'}<div class="var-results-title">Variaciones disponibles</div><div class="var-card-grid">${cards || '<p class="muted">No hay coincidencias con stock para esta selección.</p>'}</div></div><aside class="var-summary"><h3>${text(product.nombre)}</h3>${current ? `${(current.imagen || product.imagen) ? `<img src="${text(current.imagen || product.imagen)}" alt="" loading="lazy"/>` : ''}<p>${text(variationLabel(current))}</p><strong>${money(current.precio)}</strong><small>${text(current.sku || 'Sin SKU')}</small><span class="stock-chip ${currentOk ? 'ok' : 'no'}">${currentOk ? 'Con stock' : 'Sin stock'}</span>` : '<p class="muted">Selecciona una variación.</p>'}</aside></div>`;
@@ -808,7 +830,18 @@ async function pollSyncStatus(reloadWhenDone=false) {
 let productSearchTimer;
 function scheduleProductSearch() { clearTimeout(productSearchTimer); productSearchTimer = setTimeout(() => loadProducts(false), 350); }
 async function loadPanel(force=false) {
-  const email = $('customerEmail').value.trim(); if (!email) return alert('Ingrese email del cliente.');
+  const rawEmail = $('customerEmail').value.trim();
+  const email = cleanEmail(rawEmail);
+  if (!email) {
+    if (rawEmail && isTemplatePlaceholder(rawEmail)) {
+      $('customerEmail').value = '';
+      notifyWarning('Email de Chatwoot no resuelto', 'Se ignoró un placeholder como {{contact.email}}. El panel seguirá cargando productos y tomará datos reales por postMessage/API.');
+      return loadProducts(force);
+    }
+    if (rawEmail) notifyWarning('Email inválido', 'Ingresa un correo real o deja el campo vacío para cargar solo productos.');
+    return loadProducts(force);
+  }
+  $('customerEmail').value = email;
   $('loadBtn').disabled = true;
   try {
     const [clientData] = await Promise.all([api(`/cliente?email=${encodeURIComponent(email)}${force ? '&refresh=true' : ''}`), loadProducts(force)]);

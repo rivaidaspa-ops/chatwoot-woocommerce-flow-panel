@@ -1,4 +1,4 @@
-// v8.1: multitienda tolerante a credenciales faltantes, productos por tienda y mensajes claros.
+// v8.3.8: base estable v8.3 con Chatwoot context robusto y meta helpers.
 
 const crypto = require('crypto');
 const path = require('path');
@@ -649,7 +649,34 @@ function flowSign(params) {
   return crypto.createHmac('sha256', process.env.FLOW_SECRET_KEY || '').update(toSign).digest('hex');
 }
 function buildFlowPayload(params) { const p = { ...params }; p.s = flowSign(p); return new URLSearchParams(p).toString(); }
+const RUT_META_KEYS = ['billing_rut','_billing_rut','shipping_rut','_shipping_rut','rut','rivaida_rut','billing_document','shipping_document','billing_cedula','shipping_cedula','billing_nit','shipping_nit'];
 function normalizeDocument(value = '') { return String(value || '').replace(/[.\-\s]/g, '').trim().toUpperCase(); }
+function getMetaValue(metaData = [], keys = []) {
+  const wanted = new Set((keys || []).map(k => normalizeText(k)));
+  for (const item of Array.isArray(metaData) ? metaData : []) {
+    const key = normalizeText(item?.key || item?.name || '');
+    if (wanted.has(key)) return item?.value ?? item?.display_value ?? '';
+  }
+  return '';
+}
+function mergeMetaData(items = []) {
+  const map = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const key = String(item?.key || '').trim();
+    if (!key) continue;
+    const value = item?.value ?? '';
+    map.set(normalizeText(key), { key, value });
+  }
+  return Array.from(map.values());
+}
+function isTemplatePlaceholder(value = '') {
+  const raw = String(value || '').trim();
+  return !raw || /\{\{|\}\}|\$\{|<%|%>|^undefined$|^null$/i.test(raw);
+}
+function isValidEmailValue(value = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  return !isTemplatePlaceholder(raw) && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(raw);
+}
 function buildDocumentMeta(documentValue, store) {
   const st = resolveStore(store.id || store);
   if (!documentValue) return [];
@@ -862,6 +889,8 @@ app.get('/cliente', async (req, res, next) => {
   try {
     const email = String(req.query.email || req.query.email_cliente || req.query.customer_email || '').trim().toLowerCase();
     if (!email) return res.status(400).json({ error: 'Debe indicar email del cliente' });
+    if (isTemplatePlaceholder(email)) return res.json({ cliente: { nombre:'', email:'', telefono:'', rut:'', direccion:{} }, pedidos: [], skipped: true, reason: 'email_placeholder_no_resuelto' });
+    if (!isValidEmailValue(email)) return res.status(400).json({ error: 'Email inválido. Usa un correo real o deja el campo vacío para cargar solo productos.' });
     const force = req.query.refresh === 'true';
     const st = storeFromReq(req);
     const wc = wcForStore(st);
@@ -1490,5 +1519,5 @@ app.use((error, req, res, next) => {
   const status = error.status || error.response?.status || 500;
   res.status(status).json({ error: formatWooError(error), status, store_config_missing: /WooCommerce no configurado/.test(String(error.message || '')) });
 });
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.3.7 activo en puerto ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Panel v8.3.8 activo en puerto ${PORT}`));
 process.on('SIGTERM', () => { console.log('SIGTERM recibido, cerrando servidor'); server.close(() => process.exit(0)); });
